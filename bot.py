@@ -36,9 +36,15 @@ def home_kb():
       [btn("📣 کانال تلگرام",url=TG_URL),btn("🛒 سایت فروشگاه",url=SHOP_URL)]
     ])
 def cats(): return sorted(set(p['category'] for p in DATA if p.get('published',True)))
+def category_code(category):
+    return str(cats().index(category))
+def category_from_code(code):
+    try: return cats()[int(code)]
+    except (ValueError, IndexError): return None
 def categories_kb():
     rows=[]; c=cats()
-    for i in range(0,len(c),2): rows.append([btn("✨ "+c[i],f"cat:{c[i]}:0")]+([btn("✨ "+c[i+1],f"cat:{c[i+1]}:0")] if i+1<len(c) else []))
+    for i in range(0,len(c),2):
+        rows.append([btn("✨ "+c[i],f"cat:{category_code(c[i])}:0")]+([btn("✨ "+c[i+1],f"cat:{category_code(c[i+1])}:0")] if i+1<len(c) else []))
     rows.append([btn("📚 همه محصولات", "catalog:0")]); rows.append(nav_row())
     return InlineKeyboardMarkup(inline_keyboard=rows)
 def product_keyboard(p):
@@ -56,7 +62,9 @@ def product_text(p):
         a=v.get('attribute') or v.get('name','')
         if a and a not in labels: labels.append(a)
       if labels: opt='\n\n<b>تنوع‌ها:</b> '+ '، '.join(labels)
-    return f"<b>✨ {esc(p['name'])}</b>\n\n{esc(desc[:700])}{opt}\n\n<i>قیمت و موجودی لحظه‌ای را از فروشگاه استعلام بگیر.</i>"
+    prices=variant_lines(p)
+    price_text=("\n\n<b>قیمت‌های ثبت‌شده:</b>\n"+"\n".join(prices)) if prices else ""
+    return f"<b>✨ {esc(p['name'])}</b>\n\n{esc(desc[:700])}{opt}{price_text}\n\n<i>برای تأیید قیمت نهایی و موجودی لحظه‌ای از دکمه‌های استعلام استفاده کن.</i>"
 def esc(s):
     import html
     return html.escape(str(s or ''))
@@ -109,13 +117,16 @@ async def cb_catalog(c:CallbackQuery):
     await c.message.edit_text(f"<b>🛍 محصولات لیانا</b>\nصفحه {page+1} از {(len(items)+PAGE_SIZE-1)//PAGE_SIZE}\nبرای مشاهده جزئیات، محصول رو انتخاب کن.",reply_markup=paginated(items,page,'catalog')); await c.answer()
 @dp.callback_query(F.data.startswith('cat:'))
 async def cb_cat(c:CallbackQuery):
-    _,cat,page=c.data.split(':',2); page=int(page); items=[p for p in DATA if p['category']==cat and p.get('published',True)]
-    await c.message.edit_text(f"<b>✨ {esc(cat)}</b>\n{len(items)} محصول در این دسته",reply_markup=paginated(items,page,'catpage:'+cat)); await c.answer()
+    _,code,page=c.data.split(':',2); page=int(page); cat=category_from_code(code)
+    if cat is None: await c.answer('دسته‌بندی پیدا نشد',show_alert=True); return
+    items=[p for p in DATA if p['category']==cat and p.get('published',True)]
+    await c.message.edit_text(f"<b>✨ {esc(cat)}</b>\n{len(items)} محصول در این دسته",reply_markup=paginated(items,page,'catpage:'+code)); await c.answer()
 @dp.callback_query(F.data.startswith('catpage:'))
 async def cb_catpage(c:CallbackQuery):
-    _,page,cat=c.data.split(':',2); page=int(page)
+    _,page,code=c.data.split(':',2); page=int(page); cat=category_from_code(code)
+    if cat is None: await c.answer('دسته‌بندی پیدا نشد',show_alert=True); return
     items=[p for p in DATA if p['category']==cat and p.get('published',True)]
-    await c.message.edit_text(f"<b>✨ {esc(cat)}</b>\n{len(items)} محصول در این دسته",reply_markup=paginated(items,page,'catpage:'+cat)); await c.answer()
+    await c.message.edit_text(f"<b>✨ {esc(cat)}</b>\n{len(items)} محصول در این دسته",reply_markup=paginated(items,page,'catpage:'+code)); await c.answer()
 @dp.callback_query(F.data.startswith('searchpage:'))
 async def cb_searchpage(c:CallbackQuery):
     _,page,query=c.data.split(':',2); page=int(page); query=__import__('urllib.parse').parse.unquote(query)
@@ -156,17 +167,54 @@ async def cb_shop(c:CallbackQuery):
     "📍 <b>شعبه ۲:</b> بندر گناوه، پارکینگ ملت، پاساژ جام جم، پلاک ۱۰.\n\n"
     f"☎️ <b>استعلام قیمت و موجودی:</b>\n<code>{esc(PHONE_1)}</code>\n<code>{esc(PHONE_2)}</code>\n\n"
     "برای تماس، شماره را کپی کن یا از دکمه‌های زیر استفاده کن.")
-    kb=InlineKeyboardMarkup(inline_keyboard=[[btn('📞 تماس با شعبه ۱',url='tel:'+PHONE_1),btn('📞 تماس با شعبه ۲',url='tel:'+PHONE_2)],[btn('📣 تلگرام',url=TG_URL),btn('🛒 سایت',url=SHOP_URL)],nav_row()])
+    kb=InlineKeyboardMarkup(inline_keyboard=[[btn('📞 شماره شعبه ۱','phone:1'),btn('📞 شماره شعبه ۲','phone:2')],[btn('📣 تلگرام',url=TG_URL),btn('🛒 سایت',url=SHOP_URL)],nav_row()])
     await c.message.edit_text(text,reply_markup=kb); await c.answer()
+def money_toman(raw):
+    try:
+        n=int(str(raw).replace(",","").strip())
+        return f"{n:,}".replace(",", "٬") + " تومان"
+    except (TypeError, ValueError):
+        return None
+
+def variant_lines(p):
+    out=[]
+    for v in p.get("variants", []):
+        attr=(v.get("attribute") or v.get("name") or "").strip()
+        price=money_toman(v.get("price_raw"))
+        stock=(v.get("stock_file") or p.get("stock_file") or "نامشخص").strip()
+        bits=[]
+        if attr: bits.append(esc(attr))
+        if price: bits.append("<b>"+esc(price)+"</b>")
+        bits.append("موجودی فایل: "+esc(stock))
+        out.append("• "+" — ".join(bits))
+    return out
+
+@dp.callback_query(F.data.startswith('phone:'))
+async def cb_phone(c:CallbackQuery):
+    number=PHONE_1 if c.data.endswith(':1') else PHONE_2
+    await c.answer()
+    await c.message.answer("📞 شماره تماس فروشگاه:\\n<code>"+esc(number)+"</code>\\nشماره را لمس و کپی کن.")
+
 @dp.callback_query(F.data.startswith('ask:'))
 async def cb_ask(c:CallbackQuery):
     _,kind,pid=c.data.split(':',2); p=find(pid)
     if not p: await c.answer('محصول پیدا نشد',show_alert=True); return
-    label='قیمت' if kind=='price' else 'موجودی'
-    text=(f"<b>📨 استعلام {label}</b>\n\nمحصول: <b>{esc(p['name'])}</b>\n\n"
-          f"برای دریافت {label} به‌روز، با فروشگاه تماس بگیر:\n<code>{esc(PHONE_1)}</code>\n<code>{esc(PHONE_2)}</code>\n\n"
-          "وضعیت فایل CSV ممکنه با موجودی لحظه‌ای متفاوت باشه.")
-    kb=InlineKeyboardMarkup(inline_keyboard=[[btn('📞 تماس با شماره ۱',url='tel:'+PHONE_1),btn('📞 تماس با شماره ۲',url='tel:'+PHONE_2)],[btn('🔗 صفحه محصول',url=p['product_url'])],nav_row()])
+    lines=variant_lines(p)
+    if kind == 'price':
+        if lines:
+            text=(f"<b>💰 قیمت ثبت‌شده در فایل</b>\n\nمحصول: <b>{esc(p['name'])}</b>\n\n"
+                  + "\n".join(lines)
+                  + "\n\n<i>قیمت‌ها از فایل داده خوانده شده‌اند؛ پیش از خرید قیمت نهایی را با فروشگاه تأیید کنید.</i>")
+        else:
+            text=(f"<b>💰 استعلام قیمت</b>\n\nمحصول: <b>{esc(p['name'])}</b>\n"
+                  "برای این محصول قیمت قابل‌خواندن در فایل ثبت نشده است؛ لطفاً از فروشگاه استعلام بگیر.")
+    else:
+        status=p.get('stock_file') or 'نامشخص'
+        text=(f"<b>📦 وضعیت موجودی ثبت‌شده</b>\n\nمحصول: <b>{esc(p['name'])}</b>\n"
+              f"وضعیت کلی فایل: <b>{esc(status)}</b>")
+        if lines: text += "\n\n" + "\n".join(lines)
+        text += "\n\n<i>این وضعیت مربوط به فایل داده است و ممکن است با موجودی لحظه‌ای فروشگاه فرق داشته باشد.</i>"
+    kb=InlineKeyboardMarkup(inline_keyboard=[[btn('📞 شماره ۱','phone:1'),btn('📞 شماره ۲','phone:2')],[btn('🔗 صفحه محصول',url=p['product_url'])],nav_row()])
     await c.message.answer(text,reply_markup=kb); await c.answer()
 
 async def main():
