@@ -30,7 +30,7 @@ PAGE_SIZE=8
 bot=Bot(TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp=Dispatcher()
 
-HOME_TEXT=("<b>✦ LIYANA BEAUTY ✦</b>\n"
+HOME_TEXT=("<b>✦ LIYANA SHOP ✦</b>\n"
 "<i>فروشگاه آرایشی و بهداشتی لیانا</i>\n\n"
 "سلام خوش اومدی 🌷\nاز منوی زیر می‌تونی محصولات رو ببینی، محصول مناسب رو پیدا کنی یا از فروشگاه درباره قیمت و موجودی بپرسی.")
 
@@ -87,7 +87,7 @@ def variant_lines(p):
 
 def product_text(p):
     desc=p.get('description','').strip()
-    if not desc: desc=describe_product(p)
+    if not desc or 'باید با توضیحات سازنده تأیید شود' in desc or 'باید از عکس و مشخصات سازنده بررسی شود' in desc: desc=describe_product(p)
     variants=p.get('variants',[])
     opt=''
     if variants:
@@ -187,7 +187,7 @@ def product_context(query:str, limit=8):
             attr=str(v.get('attribute') or v.get('name') or '').strip()
             stock=str(v.get('stock_file') or p.get('stock_file') or 'نامشخص')
             variants.append({'variant':attr,'price_raw':price,'stock_file':stock})
-        out.append({'name':p.get('name',''),'category':p.get('category',''),'description':p.get('description',''),'stock_file':p.get('stock_file','نامشخص'),'variants':variants,'product_url':p.get('product_url','')})
+        out.append({'name':p.get('name',''),'category':p.get('category',''),'description':p.get('description',''),'variants':variants,'product_url':p.get('product_url',''),'image':p.get('image','')})
     return out
 
 # --- دامنه گفت‌وگو و پایگاه دانش آرایشی آفلاین ---
@@ -435,7 +435,7 @@ def offline_answer(user_text:str)->str:
     talk=is_small_talk(q)
     if talk=='bye': return random.choice(('فعلاً، ممنون که به لیانا سر زدی 🌷 هر وقت سؤال محصول داشتی برگرد.','خداحافظ 💕 روزت قشنگ! هر وقت درباره محصولات سؤال داشتی من اینجام.','به امید دیدار 🌸'))
     if talk=='how': return random.choice(('ممنون که پرسیدی 🌷 آماده‌ام برای پیدا کردن محصول کمکت کنم؛ تو چطوری؟','مرسی از لطفت 💗 بگو دنبال چه محصولی هستی؟','خوبم و آماده‌ام کمک کنم 🌸'))
-    if talk=='greet' and len(q.split())<=6: return random.choice(('سلام عزیزم 🌷 خوش اومدی به لیانا بیوتی! چه محصولی رو برات پیدا کنم؟','سلام سلام 💕 درباره محصولات آرایشی یا مراقبت پوست چی می‌خوای بدونی؟','درود 🌸 می‌تونم هم سؤال‌های آرایشی رو جواب بدم هم محصولات لیانا رو پیدا کنم.'))
+    if talk=='greet' and len(q.split())<=6: return random.choice(('سلام عزیزم 🌷 خوش اومدی به لیانا شاپ! چه محصولی رو برات پیدا کنم؟','سلام سلام 💕 درباره محصولات آرایشی یا مراقبت پوست چی می‌خوای بدونی؟','درود 🌸 می‌تونم هم سؤال‌های آرایشی رو جواب بدم هم محصولات لیانا رو پیدا کنم.'))
     if talk=='thanks': return random.choice(('خواهش می‌کنم 💗 سؤال دیگه‌ای درباره محصولات داشتی بپرس.','قربونت 🌷 خوشحالم کمک کردم.','خواهش می‌کنم! 🌸'))
     if talk=='positive': return random.choice(('خوشحالم که به کارت اومد 🌷 هر سؤال دیگه‌ای درباره محصولات یا آرایش داشتی بپرس.','قربونت 💗 برای انتخاب محصول یا پیدا کردن قیمت و موجودی هم کمکت می‌کنم.'))
     if talk=='casual': return random.choice(('من اینجام که درباره محصولات و خرید از لیانا کمکت کنم 😊 تو بگو دنبال چه چیزی هستی؟','فعلاً کارم راهنمایی درباره آرایش و محصولات لیاناست 🌷 چیزی می‌خوای برات پیدا کنم؟'))
@@ -478,17 +478,51 @@ def offline_answer(user_text:str)->str:
             return '🔎 این محصولات لیانا به سؤال تو نزدیک‌ترند:\n'+'\n'.join(lines)+'\n\nقیمت و موجودی ممکن است تغییر کرده باشد؛ برای اطمینان از وضعیت امروز با فروشگاه هماهنگ کن: '+SHOP_URL
         # General advice fallback, without pretending to know a product exists.
         return '🌷 حتماً کمکت می‌کنم. برای اینکه پیشنهاد دقیق‌تری بدم، بگو دنبال چه محصولی هستی و اگر مربوط به پوستته، نوع پوستت چیه (چرب، خشک، مختلط یا حساس) و حدود بودجه‌ات چقدره؟ اگر اسم محصول خاصی مدنظرت هست هم بنویس تا داخل محصولات لیانا جست‌وجو کنم. نمی‌خوام اسم یا موجودی محصولی رو حدس بزنم.'
-    return '🌸 من دستیار لیانا بیوتی هستم و می‌تونم درباره آرایش، مراقبت پوست و مو، انتخاب محصولات، قیمت و موجودی، آدرس فروشگاه و خرید راهنمایی‌ات کنم. مثلاً بنویس «یه تینت لب خوب می‌خوام»، «برای پوست چرب چی مناسبه؟» یا «فروشگاه کجاست؟». سؤال‌های کاملاً نامرتبط رو پاسخ نمی‌دم.'
+    return '🌸 من دستیار لیانا شاپ هستم و می‌تونم درباره آرایش، مراقبت پوست و مو، انتخاب محصولات، قیمت و موجودی، آدرس فروشگاه و خرید راهنمایی‌ات کنم. مثلاً بنویس «یه تینت لب خوب می‌خوام»، «برای پوست چرب چی مناسبه؟» یا «فروشگاه کجاست؟». سؤال‌های کاملاً نامرتبط رو پاسخ نمی‌دم.'
 
 async def call_groq(user_text:str):
-    # پاسخ‌گویی محلی و بدون هیچ API خارجی؛ کل کاتالوگ روی خود ربات جست‌وجو می‌شود.
+    """Use verified local product records first, then optional AI with relevant product context."""
+    q=normalize_fa(user_text)
+    # Price/stock/existence questions must be grounded in the store's current catalog data.
+    if any(x in q for x in ('قیمت','چنده','چقدر','موجود','دارید','دارین','وجود داره','هست یا نه','پیدا میشه')):
+        local=product_status_answer(user_text)
+        if local:
+            return local
+    if not GROQ_API_KEY:
+        return offline_answer(user_text)
+    products=product_context(user_text, limit=10)
+    kb_answer=knowledge_answer(user_text) or ''
+    system_prompt=(
+      'تو مشاور فروش خوش‌برخورد و آگاه فروشگاه «لیانا شاپ» هستی و فقط به فارسی طبیعی پاسخ می‌دهی. '
+      'به مشتری هرگز درباره فایل، JSON، دیتابیس، کد، منبع داخلی یا روش فنی دریافت اطلاعات حرف نزن. '
+      'از اطلاعات محصولی که در زمینه گفتگو آمده استفاده کن؛ نام، رنگ، ترکیبات، حجم، SPF، ماندگاری، ادعای درمانی یا سازگاری را اگر منبعی تأیید نکرده، نساز. '
+      'اگر رنگ‌ها/ویژگی‌ها در داده محصول ثبت نشده‌اند، شفاف بگو اطلاعات دقیق آن مورد را نداریم و لینک محصول/فروشگاه را پیشنهاد بده. '
+      'برای پیشنهاد محصول، ابتدا نیاز و نوع پوست/تناژ/بودجه مشتری را در نظر بگیر؛ اگر کافی نیست یک سؤال کوتاه بپرس. '
+      'قیمت و موجودی ممکن است تغییر کند؛ فقط اعداد و وضعیت موجود در داده مرتبط را گزارش کن و برای تأیید نهایی ارجاع به فروشگاه بده. '
+      'از ادعاهای پزشکی قطعی پرهیز کن، در حساسیت شدید یا مشکلات پوستی ماندگار مراجعه به متخصص را پیشنهاد بده. '
+      'کوتاه، کاربردی، گرم و حرفه‌ای بنویس؛ پاسخ را به شکل فروشنده واقعی ارائه کن و درباره محدودیت فنی سیستم توضیح نده.'
+    )
+    context='اطلاعات مرتبط محصولات فروشگاه (فقط برای راهنمایی دقیق؛ این داده‌ها را به شکل فایل یا منبع فنی به مشتری معرفی نکن):\n'+json.dumps(products,ensure_ascii=False)
+    if kb_answer:
+        context+='\nدانش عمومی مرتبط: '+kb_answer
+    payload={'model':GROQ_MODEL,'messages':[{'role':'system','content':system_prompt},{'role':'user','content':context+'\n\nپرسش مشتری: '+user_text}],'temperature':0.35,'max_tokens':700}
+    try:
+        timeout=aiohttp.ClientTimeout(total=18)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post('https://api.groq.com/openai/v1/chat/completions',headers={'Authorization':'Bearer '+GROQ_API_KEY,'Content-Type':'application/json'},json=payload) as response:
+                if response.status==200:
+                    body=await response.json()
+                    answer=body['choices'][0]['message']['content'].strip()
+                    if answer: return answer
+    except Exception:
+        pass
     return offline_answer(user_text)
 
 @dp.callback_query(F.data=='ai:open')
 async def cb_ai_open(c:CallbackQuery):
     uid=c.from_user.id
     AI_USERS.add(uid); OWNER_PASSWORD_PENDING.discard(uid)
-    await c.message.answer('🤖 <b>دستیار محصولات لیانا بیوتی</b>\n\nبه پرسش‌های رایج آرایش و مراقبت پوست و مو پاسخ می‌دهم، سؤال‌های محاوره‌ای را می‌فهمم و در محصولات لیانا جست‌وجو می‌کنم؛ به کلید API نیاز ندارم. اطلاعات دقیق ترکیبات و سازگاری همه کالاها در دسترس نیست؛ در موارد نامشخص حدس نمی‌زنم.\n\nمی‌توانی درباره مراقبت پوست، اصول آرایش، ایمنی محصولات، نام محصول، قیمت یا موجودی محصولات بپرسی؛ سؤال‌های نامرتبط پاسخ داده نمی‌شوند.\n\nپیامت را بفرست؛ برای خروج دکمه زیر را بزن.',reply_markup=ai_kb())
+    await c.message.answer('🤖 <b>دستیار محصولات لیانا شاپ</b>\n\nبه پرسش‌های رایج آرایش و مراقبت پوست و مو پاسخ می‌دهم، سؤال‌های محاوره‌ای را می‌فهمم و در محصولات لیانا جست‌وجو می‌کنم؛ اگر اطلاعات دقیق رنگ یا ترکیبات محصول مشخص نباشد، حدس نمی‌زنم و راه بررسی را پیشنهاد می‌دهم.\n\nمی‌توانی درباره مراقبت پوست، اصول آرایش، ایمنی محصولات، نام محصول، قیمت یا موجودی محصولات بپرسی؛ سؤال‌های نامرتبط پاسخ داده نمی‌شوند.\n\nپیامت را بفرست؛ برای خروج دکمه زیر را بزن.',reply_markup=ai_kb())
     await c.answer()
 
 @dp.callback_query(F.data=='ai:owner')
@@ -525,7 +559,7 @@ async def text_search(m:Message):
         if len(q)<2: return
         owner_mode=(uid in OWNER_AI_USERS and is_owner_id(uid))
         if not is_beauty_question(q):
-            await m.answer('🌸 من فقط درباره محصولات آرایشی و بهداشتی فروشگاه لیانا بیوتی کمک می‌کنم. لطفاً درباره محصول، نوع پوست، رنگ، قیمت یا موجودی سؤال بپرس.\n\n',reply_markup=ai_kb())
+            await m.answer('🌸 من فقط درباره محصولات آرایشی و بهداشتی فروشگاه لیانا شاپ کمک می‌کنم. لطفاً درباره محصول، نوع پوست، رنگ، قیمت یا موجودی سؤال بپرس.\n\n',reply_markup=ai_kb())
             return
         answer=await call_groq(q)
         await m.answer(esc(answer),reply_markup=ai_kb())
