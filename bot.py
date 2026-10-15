@@ -669,7 +669,7 @@ def recommendation_answer(user_text:str):
         base+='پوستت بیشتر چربه یا خشکه/مختلط؟ جوش‌ها بیشتر زیرپوستی‌اند یا قرمز و ملتهب؟ با این دو مورد دقیق‌تر راهنمایی‌ات می‌کنم.'
         return base
     # Product family requests: explain what it is, then list matching store items and useful complements.
-    families=[('نمک بدن','نمک بدن'),('پنکیک','پنکیک'),('رژ لب','رژ لب'),('رژلب','رژ لب'),('تینت','تینت'),('کانسیلر','کانسیلر'),('کرم پودر','کرم پودر'),('کرمپودر','کرم پودر'),('آبرسان','آبرسان'),('مرطوب کننده','مرطوب کننده'),('ریمل','ریمل'),('رژگونه','رژگونه')]
+    families=[('بادی اسپلش','بادی اسپلش'),('بادیاسپلش','بادی اسپلش'),('بادی اسپری','بادی اسپلش'),('اسپری بدن','بادی اسپلش'),('خوشبوکننده بدن','بادی اسپلش'),('بوی خوب','بادی اسپلش'),('رایحه','بادی اسپلش'),('نمک بدن','نمک بدن'),('پنکیک','پنکیک'),('رژ لب','رژ لب'),('رژلب','رژ لب'),('تینت','تینت'),('کانسیلر','کانسیلر'),('کرم پودر','کرم پودر'),('کرمپودر','کرم پودر'),('آبرسان','آبرسان'),('مرطوب کننده','مرطوب کننده'),('ریمل','ریمل'),('رژگونه','رژگونه')]
     chosen=next(((word,key) for word,key in families if word in q),None)
     if chosen and (any(x in q for x in ('بهترین','پیشنهاد','معرفی','چی خوبه','می خواهم','میخوام','دارید','پیدا کن','پیدا کنه','خوبه','مناسب')) or any(x in q for x in ('گندمی','روشن','تیره','سبزه','تناژ','رنگ پوستم','بهم میاد','به من میاد'))):
         word,key=chosen
@@ -679,6 +679,7 @@ def recommendation_answer(user_text:str):
             elif key=='تینت': intro='تینت برای رنگ‌دهی سبک و طبیعی به لب کاربرد دارد؛ شدت رنگ را می‌توان معمولاً با لایه‌گذاری بیشتر کرد. گزینه‌های لیانا: '
             elif key=='کانسیلر': intro='کانسیلر برای پوشش موضعی تیرگی زیر چشم یا لک‌هاست؛ انتخاب بافت و رنگ به نوع پوست و تناژ بستگی دارد. گزینه‌های لیانا: '
             elif key=='پنکیک': intro='پنکیک برای مرتب‌کردن آرایش پایه و یکدست‌تر نشان‌دادن پوست کاربرد دارد؛ کد رنگ باید با پوست و گردن هماهنگ باشد. گزینه‌های لیانا: '
+            elif key=='بادی اسپلش': intro='بادی‌اسپلش برای خوشبوکردن بدن استفاده می‌شود؛ رایحه‌ی خوشایند کاملاً سلیقه‌ای است و ماندگاری هر مدل را بدون اطلاعات سازنده نمی‌شود قطعی گفت. 🌸 چند گزینه از محصولات لیانا برای بررسی: '
             elif key=='آبرسان' or key=='مرطوب کننده': intro='آبرسان/مرطوب‌کننده به حفظ رطوبت پوست کمک می‌کند؛ بافت و ترکیبات را متناسب با پوستت انتخاب کن. گزینه‌های لیانا: '
             elif key=='رژ لب': intro='رژلب مناسب می‌تواند رنگ صورت را شاداب‌تر نشان دهد؛ برای پوست گندمی، طیف رز گرم، هلویی، آجری و مرجانی اغلب انتخاب‌های خوبی برای امتحان‌اند. رنگ نهایی به تناژ پوست و مدل بستگی دارد. گزینه‌های لیانا: '
             else: intro=f'{key} برای تکمیل آرایش/روتین زیبایی استفاده می‌شود؛ نتیجه نهایی به مدل و ویژگی‌های درج‌شده روی محصول بستگی دارد. گزینه‌های لیانا: '
@@ -791,7 +792,27 @@ def offline_answer(user_text:str, history=None)->str:
             return '🔎 این محصولات لیانا به سؤال تو نزدیک‌ترند:\n'+'\n'.join(lines)+'\n\nقیمت و موجودی ممکن است تغییر کرده باشد؛ برای اطمینان از وضعیت امروز با فروشگاه هماهنگ کن: '+SHOP_URL
         # General advice fallback, without pretending to know a product exists.
         return '🌷 حتماً کمکت می‌کنم. برای اینکه پیشنهاد دقیق‌تری بدم، بگو دنبال چه محصولی هستی و اگر مربوط به پوستته، نوع پوستت چیه (چرب، خشک، مختلط یا حساس) و حدود بودجه‌ات چقدره؟ اگر اسم محصول خاصی مدنظرت هست هم بنویس تا داخل محصولات لیانا جست‌وجو کنم. نمی‌خوام اسم یا موجودی محصولی رو حدس بزنم.'
-    return '🌸 من دستیار لیانا شاپ هستم و می‌تونم درباره آرایش، مراقبت پوست و مو، انتخاب محصولات، قیمت و موجودی، آدرس فروشگاه و خرید راهنمایی‌ات کنم. مثلاً بنویس «یه تینت لب خوب می‌خوام»، «برای پوست چرب چی مناسبه؟» یا «فروشگاه کجاست؟». سؤال‌های کاملاً نامرتبط رو پاسخ نمی‌دم.'
+    # Last-chance keyword extraction: if the message contains a recognizable product
+    # family but was phrased unusually, search the catalogue instead of returning a hollow reply.
+    keyword_families = {
+      'بادی اسپلش': ('بادی اسپلش','بادیاسپلش','بادی اسپری','اسپری بدن','خوشبوکننده بدن','رایحه','بوی خوب'),
+      'عطر': ('عطر','ادکلن','عطر بدن'),
+      'رژ لب': ('رژ لب','رژلب','رژ مایع','رژ جامد'),
+      'لیپ گلاس': ('لیپ گلاس','لیپگلاس','برق لب'),
+      'تینت': ('تینت',), 'ریمل': ('ریمل',), 'کانسیلر': ('کانسیلر',),
+      'رژگونه': ('رژگونه','رژ گونه'), 'ضد آفتاب': ('ضد آفتاب','ضدافتاب'),
+      'شوینده': ('شوینده','فیس واش','ژل شستشو'), 'آبرسان': ('آبرسان','مرطوب کننده')
+    }
+    for family, keywords in keyword_families.items():
+        if any(normalize_fa(k) in q for k in keywords):
+            matches=search_products(family,5)
+            if matches:
+                lines=[]
+                for item in matches[:5]:
+                    price=money_toman((item.get('variants') or [{}])[0].get('price_raw'))
+                    lines.append('🧴 <b>'+esc(item.get('name','محصول'))+'</b>'+(' — '+esc(price) if price else ''))
+                return '🔎 از روی کلمات کلیدی پیامت، این محصولات مرتبط رو در لیانا پیدا کردم 🌷\\n\\n'+'\\n'.join(lines)+'\\n\\nبرای دیدن جزئیات هر محصول روی دکمه‌اش بزن. اگر رایحه، کاربرد یا بودجه‌ی خاصی مدنظرت هست بگو تا پیشنهادها رو دقیق‌تر کنم.'
+    return '🌸 من دستیار لیانا شاپ هستم و می‌تونم درباره آرایش، مراقبت پوست و مو، انتخاب محصولات، قیمت و موجودی، آدرس فروشگاه و خرید راهنمایی‌ات کنم. مثلاً بنویس «یه تینت لب خوب می‌خوام»، «برای پوست چرب چی مناسبه؟» یا «یه بادی‌اسپلش خوشبو معرفی کن». اگر منظورت محصول خاصیه، اسم یا کاربردش رو بگو تا داخل محصولات لیانا جست‌وجو کنم.'
 
 async def call_groq(user_text:str, history=None):
     """Use verified local product records first, then optional AI with relevant product context."""
@@ -895,10 +916,23 @@ async def text_search(m:Message):
         await m.answer(esc(answer),reply_markup=conversational_keyboard(q,history,answer))
         return
     if q.startswith('/') or len(q)<2: return
+    # Keep direct product-name lookup for short, name-like queries. Natural-language
+    # questions should go through the same intent understanding even when the user
+    # has not explicitly opened AI chat from the menu.
     found=[p for p in DATA if normalize_fa(q) in normalize_fa(p['name']) and p.get('published',True)][:40]
-    if not found:
-      await m.answer("محصولی با این نام پیدا نکردم. می‌تونی از دسته‌بندی‌ها انتخاب کنی یا نام دیگری بنویسی.",reply_markup=categories_kb()); return
-    await m.answer(f"🔎 <b>{len(found)}</b> نتیجه برای «{esc(q)}» (حداکثر ۴۰ نتیجه):",reply_markup=paginated(found,0,'searchpage:'+quote(q,safe='')))
+    is_name_query = len(normalize_fa(q).split()) <= 3 and not any(x in normalize_fa(q) for x in (
+        'می خواهم','می خواستم','پیشنهاد','معرفی','خوب','مناسب','چی','چطور','چگونه','برای من','بهترین','دارید','بخرم','می شود'
+    ))
+    if found and is_name_query:
+      await m.answer(f"🔎 <b>{len(found)}</b> نتیجه برای «{esc(q)}» (حداکثر ۴۰ نتیجه):",reply_markup=paginated(found,0,'searchpage:'+quote(q,safe='')))
+      return
+    # Always answer conversational questions, not just exact product names. This makes
+    # messages like «یه بادی اسپلش خوب معرفی کن» work from the normal chat too.
+    history=history_get(uid)
+    answer=await call_groq(q,history=history)
+    history_add(uid,'user',q)
+    history_add(uid,'assistant',answer)
+    await m.answer(esc(answer),reply_markup=conversational_keyboard(q,history,answer))
 @dp.callback_query(F.data=='home')
 async def cb_home(c:CallbackQuery):
     AI_USERS.discard(c.from_user.id)
