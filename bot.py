@@ -131,16 +131,50 @@ def find(pid): return next((p for p in DATA if str(p['id'])==str(pid)),None)
 async def start(m:Message):
     AI_USERS.discard(m.from_user.id)
     OWNER_PASSWORD_PENDING.discard(m.from_user.id)
+    history_clear(m.from_user.id)
     await m.answer(HOME_TEXT,reply_markup=home_kb())
 @dp.message(Command("home"))
 async def home(m:Message):
     AI_USERS.discard(m.from_user.id)
     OWNER_PASSWORD_PENDING.discard(m.from_user.id)
+    history_clear(m.from_user.id)
     await m.answer(HOME_TEXT,reply_markup=home_kb())
 # --- AI chat, weekly quota and owner test mode ---
 def init_db():
     with sqlite3.connect(DB_PATH) as con:
         con.execute("CREATE TABLE IF NOT EXISTS ai_usage (user_id INTEGER NOT NULL, week_key TEXT NOT NULL, used INTEGER NOT NULL DEFAULT 0, PRIMARY KEY(user_id, week_key))")
+        # Short conversation memory lets follow-up answers such as «گندمیه»
+        # be interpreted against the question the assistant asked previously.
+        con.execute("CREATE TABLE IF NOT EXISTS ai_history (user_id INTEGER NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at INTEGER NOT NULL)")
+
+def history_get(user_id:int, limit:int=12):
+    with sqlite3.connect(DB_PATH) as con:
+        rows=con.execute("SELECT role,content FROM ai_history WHERE user_id=? ORDER BY created_at DESC, rowid DESC LIMIT ?",(user_id,limit)).fetchall()
+    return [{'role':r,'content':c} for r,c in reversed(rows)]
+
+def history_add(user_id:int, role:str, content:str):
+    with sqlite3.connect(DB_PATH) as con:
+        con.execute("INSERT INTO ai_history(user_id,role,content,created_at) VALUES(?,?,?,?)",(user_id,role,str(content)[:3000],int(time.time())))
+        # Keep the latest 12 messages per customer; old turns are not needed.
+        con.execute("DELETE FROM ai_history WHERE user_id=? AND rowid NOT IN (SELECT rowid FROM ai_history WHERE user_id=? ORDER BY created_at DESC, rowid DESC LIMIT 12)",(user_id,user_id))
+
+def history_clear(user_id:int):
+    with sqlite3.connect(DB_PATH) as con:
+        con.execute("DELETE FROM ai_history WHERE user_id=?",(user_id,))
+
+def contextual_query(user_text:str, history:list):
+    """Join short follow-up answers to the active product/beauty question."""
+    q=normalize_fa(user_text)
+    if not history:
+        return user_text
+    last_assistant=next((x['content'] for x in reversed(history) if x.get('role')=='assistant'),'')
+    previous_user=next((x['content'] for x in reversed(history) if x.get('role')=='user'),'')
+    if len(q.split())<=6 and previous_user:
+        assistant_q=normalize_fa(last_assistant)
+        followup_markers=('رنگ پوست','تناژ','نوع پوست','پوستت چرب','پوستت خش','بودجه','برای تیرگی','برای لک','چه نتیجه','کدام محصول','کدوم محصول')
+        if any(normalize_fa(x) in assistant_q for x in followup_markers):
+            return f"{previous_user}؛ پاسخ تکمیلی مشتری: {user_text}؛ سؤال قبلی دستیار: {last_assistant}"
+    return user_text
 
 def current_week_key():
     # ISO week: resets every Monday, based on UTC to avoid server timezone surprises.
@@ -253,6 +287,8 @@ def product_name_matches(query:str):
 def is_beauty_question(q:str)->bool:
     qn=normalize_fa(q)
     if is_small_talk(qn): return True
+    # Short answers can be meaningful when the assistant just asked about skin tone/type.
+    if len(qn.split())<=4 and any(x in qn for x in ('گندمی','سبزه','روشن','متوسط','تیره','گرم','سرد','خنثی','چرب','خشک','مختلط','حساس','زیر چشم','لک','بودجه')): return True
     if product_name_matches(qn): return True
     # Store/customer-service questions are valid in the Liyana assistant.
     service_terms=('فروشگاه','لیانا','آدرس','شماره تماس','تماس','تلفن','شعبه','گناوه','پارکینگ ملت','جام جم',
@@ -431,6 +467,35 @@ def related_products(p, limit=3):
     ranked.sort(key=lambda x:(-x[0],normalize_fa(x[1].get('name',''))))
     return [x[1] for x in ranked[:limit]]
 
+def conversational_keyboard(user_text:str, history:list, answer:str):
+    """Add tappable product cards and store-information actions to AI replies."""
+    q=normalize_fa(contextual_query(user_text,history or []))
+    a=normalize_fa(answer)
+    rows=[]; products=[]; seen=set()
+    # Prefer product names explicitly mentioned in the answer, then fill from ranked search.
+    for p in DATA:
+        if not p.get('published',True): continue
+        name=normalize_fa(p.get('name',''))
+        if len(name)>=5 and name in a and str(p.get('id')) not in seen:
+            products.append(p); seen.add(str(p.get('id')))
+            if len(products)>=5: break
+    product_intent=any(x in q for x in ('تینت','کانسیلر','پنکیک','رژ لب','رژلب','کرم پودر','کرمپودر','رژگونه','ریمل','نمک بدن','آبرسان','مرطوب کننده','محصول','پیشنهاد','بهترین','دارید','قیمت','موجودی'))
+    if product_intent and len(products)<5:
+        for p in search_products(q,8):
+            pid=str(p.get('id'))
+            if pid not in seen:
+                products.append(p); seen.add(pid)
+            if len(products)>=5: break
+    for p in products[:5]:
+        rows.append([btn('🧴 '+str(p.get('name','محصول'))[:48],f"product:{p['id']}")])
+    store_intent=any(x in q for x in ('فروشگاه','لیانا','آدرس','شماره تماس','شماره فروشگاه','ساعت کاری','شعبه','ارسال','سفارش','اطلاعات فروشگاه','کجاست','کجا هستید'))
+    if store_intent:
+        rows.append([btn('🏬 اطلاعات کامل فروشگاه','shop'),btn('🛒 سایت فروشگاه',url=SHOP_URL)])
+    if rows:
+        rows.append([btn('↩️ ادامه گفت‌وگو','ai:continue'),btn('🏠 خانه','home')])
+        return InlineKeyboardMarkup(inline_keyboard=rows)
+    return ai_kb()
+
 def knowledge_answer(q:str):
     """Semantic-ish offline retrieval: normalize colloquial Persian, expand synonyms,
     score phrase/token overlap and tolerate small typos without using external APIs."""
@@ -550,9 +615,12 @@ def recommendation_answer(user_text:str):
         return 'تینت معمولاً رنگی سبک و طبیعی به لب می‌دهد و با چند لایه پررنگ‌تر می‌شود. برای اینکه بهترین گزینه موجود را پیدا کنم، بگو رنگ پوستت روشن، متوسط یا تیره است و رنگ‌های گرم مثل هلویی/عسلی دوست داری یا صورتی/رز؟'
     if any(x in q for x in ('کدام کانسیلر','کدوم کانسیلر','کانسیلر برای پوستم','کانسیلر مناسب پوست','چه کانسیلری','کانسیلر خوب')):
         items=search_products('کانسیلر',6)
+        tone=('گندمی' if 'گندمی' in q else ('سبزه' if 'سبزه' in q else ('روشن' if 'روشن' in q else ('متوسط' if 'متوسط' in q else ('تیره' if 'تیره' in q else '')))))
         if any(x in q for x in ('پوست چرب','پوستم چرب','پوست خشک','پوستم خشک','پوست مختلط','پوست حساس')):
             skin='چرب' if 'چرب' in q else ('خشک' if 'خشک' in q else ('مختلط' if 'مختلط' in q else 'حساس'))
             base=f'برای پوست {skin}، مهم است کانسیلر روی پوستت راحت بنشیند و بافتش با نیازت هماهنگ باشد؛ اما نوع پوست به‌تنهایی برای تعیین کد رنگ کافی نیست. '
+        elif tone:
+            base=f'مرسی که گفتی 💗 برای پوست {tone}، کد کانسیلر را باید با رنگ زیر چشم و تناژت هماهنگ کرد؛ فقط از روی «{tone}» نمی‌شود کد دقیق را قطعی انتخاب کرد. حالا بگو پوستت چربه، خشکه، مختلطه یا حساس؟ '
         else:
             base='حتماً 💗 برای اینکه کانسیلر هم از نظر بافت و هم رنگ بهت بیاد، اول بگو پوستت چربه، خشکه، مختلطه یا حساس؟ و رنگ پوستت روشنه، متوسطه یا تیره؟ '
         if items:
@@ -605,7 +673,7 @@ def recommendation_answer(user_text:str):
             return intro+'\n'+out+suffix
     return None
 
-def offline_answer(user_text:str)->str:
+def offline_answer(user_text:str, history=None)->str:
     import random
     q=normalize_fa(user_text)
     talk=is_small_talk(q)
@@ -615,7 +683,7 @@ def offline_answer(user_text:str)->str:
     if talk=='thanks': return random.choice(('خواهش می‌کنم 💗 سؤال دیگه‌ای درباره محصولات داشتی بپرس.','قربونت 🌷 خوشحالم کمک کردم.','خواهش می‌کنم! 🌸'))
     if talk=='positive': return random.choice(('خوشحالم که به کارت اومد 🌷 هر سؤال دیگه‌ای درباره محصولات یا آرایش داشتی بپرس.','قربونت 💗 برای انتخاب محصول یا پیدا کردن قیمت و موجودی هم کمکت می‌کنم.'))
     if talk=='casual': return random.choice(('من اینجام که درباره محصولات و خرید از لیانا کمکت کنم 😊 تو بگو دنبال چه چیزی هستی؟','فعلاً کارم راهنمایی درباره آرایش و محصولات لیاناست 🌷 چیزی می‌خوای برات پیدا کنم؟'))
-    if any(x in q for x in ('معرفی فروشگاه','معرفی کن','فروشگاه رو معرفی','درباره فروشگاه','آدرس فروشگاه','کجاست فروشگاه','کجا هستید','شماره فروشگاه','شماره تماس','شعبه های فروشگاه','شعبه های لیانا')):
+    if any(x in q for x in ('معرفی فروشگاه','اطلاعات فروشگاه','اطلاعات لیانا','معرفی کن','فروشگاه رو معرفی','درباره فروشگاه','آدرس فروشگاه','کجاست فروشگاه','کجا هستید','شماره فروشگاه','شماره تماس','شعبه های فروشگاه','شعبه های لیانا')):
         return ('🌸 فروشگاه آرایشی و بهداشتی لیانا در بندر گناوه دو شعبه دارد:\n\n📍 شعبه اول: پارکینگ ملت، راسته اصلی، بعد از داروخانه شبانه‌روزی دکتر معرفت، آخرین مغازه سمت راست.\n📍 شعبه دوم: پارکینگ ملت، پاساژ جام جم، پلاک ۱۰.\n\n🛍 سایت فروشگاه: '+SHOP_URL+'\n☎️ برای قیمت و موجودی روز می‌تونی با فروشگاه تماس بگیری: '+PHONE_1+' یا '+PHONE_2)
     if any(x in q for x in ('ساعت کاری','چه ساعتی باز','کی باز','باز هستید','تا چه ساعتی')):
         return '🌷 ساعت کاری دقیق در اطلاعات فعلی من ثبت نشده؛ برای اینکه اشتباه راهنمایی‌ات نکنم، لطفاً با فروشگاه تماس بگیر: '+PHONE_1+' یا '+PHONE_2
@@ -658,18 +726,20 @@ def offline_answer(user_text:str)->str:
         return '🌷 حتماً کمکت می‌کنم. برای اینکه پیشنهاد دقیق‌تری بدم، بگو دنبال چه محصولی هستی و اگر مربوط به پوستته، نوع پوستت چیه (چرب، خشک، مختلط یا حساس) و حدود بودجه‌ات چقدره؟ اگر اسم محصول خاصی مدنظرت هست هم بنویس تا داخل محصولات لیانا جست‌وجو کنم. نمی‌خوام اسم یا موجودی محصولی رو حدس بزنم.'
     return '🌸 من دستیار لیانا شاپ هستم و می‌تونم درباره آرایش، مراقبت پوست و مو، انتخاب محصولات، قیمت و موجودی، آدرس فروشگاه و خرید راهنمایی‌ات کنم. مثلاً بنویس «یه تینت لب خوب می‌خوام»، «برای پوست چرب چی مناسبه؟» یا «فروشگاه کجاست؟». سؤال‌های کاملاً نامرتبط رو پاسخ نمی‌دم.'
 
-async def call_groq(user_text:str):
+async def call_groq(user_text:str, history=None):
     """Use verified local product records first, then optional AI with relevant product context."""
-    q=normalize_fa(user_text)
+    history=history or []
+    interpreted_text=contextual_query(user_text,history)
+    q=normalize_fa(interpreted_text)
     # Price/stock/existence questions must be grounded in the store's current catalog data.
     if any(x in q for x in ('قیمت','چنده','چقدر','موجود','دارید','دارین','وجود داره','هست یا نه','پیدا میشه')):
-        local=product_status_answer(user_text)
+        local=product_status_answer(interpreted_text)
         if local:
             return local
     if not GROQ_API_KEY:
-        return offline_answer(user_text)
-    products=product_context(user_text, limit=10)
-    kb_answer=knowledge_answer(user_text) or ''
+        return offline_answer(interpreted_text,history=history)
+    products=product_context(interpreted_text, limit=10)
+    kb_answer=knowledge_answer(interpreted_text) or ''
     system_prompt=(
       'تو مشاور فروش خوش‌برخورد و آگاه فروشگاه «لیانا شاپ» هستی و فقط به فارسی طبیعی پاسخ می‌دهی. '
       'به مشتری هرگز درباره فایل، JSON، دیتابیس، کد، منبع داخلی یا روش فنی دریافت اطلاعات حرف نزن. '
@@ -683,7 +753,12 @@ async def call_groq(user_text:str):
     context='اطلاعات مرتبط محصولات فروشگاه (فقط برای راهنمایی دقیق؛ این داده‌ها را به شکل فایل یا منبع فنی به مشتری معرفی نکن):\n'+json.dumps(products,ensure_ascii=False)
     if kb_answer:
         context+='\nدانش عمومی مرتبط: '+kb_answer
-    payload={'model':GROQ_MODEL,'messages':[{'role':'system','content':system_prompt},{'role':'user','content':context+'\n\nپرسش مشتری: '+user_text}],'temperature':0.35,'max_tokens':700}
+    messages=[{'role':'system','content':system_prompt}]
+    # Conversation turns are included so the model can understand «همون»، «این رنگ»،
+    # and short answers to its own clarifying questions.
+    messages.extend(history[-10:])
+    messages.append({'role':'user','content':context+'\n\nپیام فعلی مشتری: '+user_text+'\nبرداشت از پیام با توجه به مکالمه: '+interpreted_text})
+    payload={'model':GROQ_MODEL,'messages':messages,'temperature':0.55,'max_tokens':700}
     try:
         timeout=aiohttp.ClientTimeout(total=18)
         async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -694,14 +769,19 @@ async def call_groq(user_text:str):
                     if answer: return answer
     except Exception:
         pass
-    return offline_answer(user_text)
+    return offline_answer(interpreted_text,history=history)
 
 @dp.callback_query(F.data=='ai:open')
 async def cb_ai_open(c:CallbackQuery):
     uid=c.from_user.id
-    AI_USERS.add(uid); OWNER_PASSWORD_PENDING.discard(uid)
+    AI_USERS.add(uid); OWNER_PASSWORD_PENDING.discard(uid); history_clear(uid)
     await c.message.answer('🤖 <b>دستیار محصولات لیانا شاپ</b>\n\nبه پرسش‌های رایج آرایش و مراقبت پوست و مو پاسخ می‌دهم، سؤال‌های محاوره‌ای را می‌فهمم و در محصولات لیانا جست‌وجو می‌کنم؛ اگر اطلاعات دقیق رنگ یا ترکیبات محصول مشخص نباشد، حدس نمی‌زنم و راه بررسی را پیشنهاد می‌دهم.\n\nمی‌توانی درباره مراقبت پوست، اصول آرایش، ایمنی محصولات، نام محصول، قیمت یا موجودی محصولات بپرسی؛ سؤال‌های نامرتبط پاسخ داده نمی‌شوند.\n\nپیامت را بفرست؛ برای خروج دکمه زیر را بزن.',reply_markup=ai_kb())
     await c.answer()
+
+@dp.callback_query(F.data=='ai:continue')
+async def cb_ai_continue(c:CallbackQuery):
+    AI_USERS.add(c.from_user.id)
+    await c.answer('ادامه بده؛ پیام‌های قبلی را در نظر می‌گیرم.')
 
 @dp.callback_query(F.data=='ai:owner')
 async def cb_ai_owner(c:CallbackQuery):
@@ -715,6 +795,7 @@ async def cb_ai_owner(c:CallbackQuery):
 @dp.callback_query(F.data=='ai:exit')
 async def cb_ai_exit(c:CallbackQuery):
     uid=c.from_user.id; AI_USERS.discard(uid); OWNER_PASSWORD_PENDING.discard(uid)
+    history_clear(uid)
     await c.message.answer('از حالت هوش مصنوعی خارج شدی 🌷',reply_markup=home_kb())
     await c.answer()
 
@@ -736,11 +817,17 @@ async def text_search(m:Message):
     if uid in AI_USERS and not q.startswith('/'):
         if len(q)<2: return
         owner_mode=(uid in OWNER_AI_USERS and is_owner_id(uid))
-        if not is_beauty_question(q):
+        history=history_get(uid)
+        interpreted=contextual_query(q,history)
+        if not is_beauty_question(q) and interpreted==q:
             await m.answer('🌸 من فقط درباره محصولات آرایشی و بهداشتی فروشگاه لیانا شاپ کمک می‌کنم. لطفاً درباره محصول، نوع پوست، رنگ، قیمت یا موجودی سؤال بپرس.\n\n',reply_markup=ai_kb())
             return
-        answer=await call_groq(q)
-        await m.answer(esc(answer),reply_markup=ai_kb())
+        answer=await call_groq(q,history=history)
+        history_add(uid,'user',q)
+        history_add(uid,'assistant',answer)
+        # Use the pre-turn history when deriving product buttons so a short answer
+        # such as «گندمی» stays linked to the original tint/concealer question.
+        await m.answer(esc(answer),reply_markup=conversational_keyboard(q,history,answer))
         return
     if q.startswith('/') or len(q)<2: return
     found=[p for p in DATA if normalize_fa(q) in normalize_fa(p['name']) and p.get('published',True)][:40]
