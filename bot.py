@@ -46,15 +46,18 @@ def home_kb():
       [btn("🤖 گفت‌وگو با هوش مصنوعی", "ai:open")],
       [btn("📣 کانال تلگرام",url=TG_URL),btn("🛒 سایت فروشگاه",url=SHOP_URL)]
     ])
-def cats(): return sorted(set(p['category'] for p in DATA if p.get('published',True)))
+def cats(): return sorted(set(str(p.get('category') or 'سایر محصولات') for p in DATA if p.get('published',True)))
 def categories_kb():
     rows=[]; c=cats()
     for i in range(0,len(c),2): rows.append([btn("✨ "+c[i],f"cat:{i}:0")]+([btn("✨ "+c[i+1],f"cat:{i+1}:0")] if i+1<len(c) else []))
     rows.append([btn("📚 همه محصولات", "catalog:0")]); rows.append(nav_row())
     return InlineKeyboardMarkup(inline_keyboard=rows)
 def product_keyboard(p):
-    rows=[[btn("💰 استعلام قیمت",f"ask:price:{p['id']}"),btn("📦 استعلام موجودی",f"ask:stock:{p['id']}")],
-          [btn("🔗 صفحه محصول",url=p['product_url'])],nav_row()]
+    rows=[[btn("💰 استعلام قیمت",f"ask:price:{p['id']}"),btn("📦 استعلام موجودی",f"ask:stock:{p['id']}")]]
+    url=str(p.get('product_url') or '').strip()
+    if url.startswith(('https://','http://')):
+        rows.append([btn("🔗 صفحه محصول",url=url)])
+    rows.append(nav_row())
     return InlineKeyboardMarkup(inline_keyboard=rows)
 def money_toman(raw):
     try:
@@ -86,21 +89,39 @@ def variant_lines(p):
     return out
 
 def product_text(p):
-    """Show only catalog facts; avoid generic or unverified generated product bios."""
-    variants=p.get('variants',[])
-    lines=[f"<b>✨ {esc(p.get('name','محصول'))}</b>"]
-    if p.get('category'):
-        lines.append('<b>دسته‌بندی:</b> '+esc(p.get('category')))
+    """Render a warm, readable product card using stored copy first, without inventing facts."""
+    name=str(p.get('name') or 'محصول').strip()
+    category=str(p.get('category') or 'سایر محصولات').strip()
+    lines=[f"<b>✨ {esc(name)}</b>", f"<b>🗂 دسته‌بندی:</b> {esc(category)}"]
+
+    stored=str(p.get('description') or '').strip()
+    normalized=normalize_fa(stored)
+    generic_copy=(
+        'این محصول برای روتین مراقبت یا بهداشت شخصی عرضه شده',
+        'این محصول از دسته',
+        'این کالا در دسته',
+        'برای تکمیل آرایش چشم استفاده می شود',
+        'این محصول برای آرایش لب است',
+    )
+    if not stored or any(normalize_fa(x) in normalized for x in generic_copy):
+        bio=describe_product(p)
+    else:
+        bio=stored
+    if bio:
+        lines.extend(['', '<b>🌷 درباره محصول</b>', esc(bio)])
+
+    variants=p.get('variants') or []
     labels=[]
     for v in variants[:12]:
-        attr=(v.get('attribute') or v.get('name') or '').strip()
-        if attr and attr not in labels: labels.append(attr)
+        attr=str(v.get('attribute') or v.get('name') or '').strip()
+        if attr and attr not in labels:
+            labels.append(attr)
     if labels:
-        lines.append('\n<b>تنوع‌های ثبت‌شده:</b> '+ '، '.join(esc(x) for x in labels))
+        lines.extend(['', '<b>📦 تنوع / بسته‌بندی ثبت‌شده:</b> '+ '، '.join(esc(x) for x in labels)])
     prices=variant_lines(p)
     if prices:
-        lines.append('\n<b>قیمت و وضعیت:</b>\n'+'\n'.join(prices))
-    lines.append('\nبرای رنگ، ترکیبات یا ویژگی‌هایی که اینجا مشخص نشده‌اند، تصویر و توضیحات بسته‌بندی محصول را بررسی کن.')
+        lines.extend(['', '<b>💰 قیمت و وضعیت ثبت‌شده:</b>', '\n'.join(prices)])
+    lines.extend(['', '<i>قیمت و موجودی ممکن است تغییر کند. ویژگی‌هایی مثل رنگ دقیق، ترکیبات و ماندگاری را فقط در صورت درج مشخصات سازنده قطعی بدان.</i>'])
     return '\n'.join(lines)
 
 def esc(s):
@@ -129,7 +150,7 @@ def matching_question(key):
     mp={'sunscreen':['ضدآفتاب'],'skincare':['مراقبت پوست','پاک‌کننده و شوینده','ضدآفتاب'], 'face':['آرایش صورت'],'lips':['آرایش لب'],'eyes':['آرایش چشم و ابرو'],'body':['عطر و خوشبوکننده','بهداشت شخصی']}
     cats_=mp.get(key,[])
     return [p for p in DATA if p['category'] in cats_ and p.get('published',True)]
-def find(pid): return next((p for p in DATA if str(p['id'])==str(pid)),None)
+def find(pid): return next((p for p in DATA if str(p.get('id',''))==str(pid)),None)
 
 @dp.message(CommandStart())
 async def start(m:Message):
@@ -204,13 +225,9 @@ def ai_kb():
 
 def product_context(query:str, limit=8):
     """Provide AI with best-ranked catalogue matches, their descriptions and variants."""
-    matches=search_products(query,limit)
-    # If user asks for a category/skin-based recommendation, retrieve product families.
+    matches=intent_products(query, limit)
     if not matches:
-        q=normalize_fa(query)
-        for term in ('تینت','کانسیلر','پنکیک','رژ لب','کرم پودر','آبرسان','نمک بدن','ریمل','رژگونه'):
-            if term in q:
-                matches=search_products(term,limit); break
+        matches=search_products(query,limit)
     out=[]
     for p in matches[:limit]:
         variants=[]
@@ -245,7 +262,7 @@ SMALL_TALK={
 
 def normalize_fa(s:str)->str:
     s=str(s or '').casefold()
-    table=str.maketrans({'ي':'ی','ك':'ک','ۀ':'ه','ة':'ه','أ':'ا','إ':'ا','ؤ':'و','ئ':'ی','‌':' ','ـ':' '})
+    table=str.maketrans({'ي':'ی','ى':'ی','ك':'ک','ۀ':'ه','ة':'ه','أ':'ا','إ':'ا','ٱ':'ا','ؤ':'و','ئ':'ی','‌':' ','ـ':' ','۰':'0','۱':'1','۲':'2','۳':'3','۴':'4','۵':'5','۶':'6','۷':'7','۸':'8','۹':'9'})
     s=s.translate(table)
     s=re.sub(r"[^\w\s؀-ۿ]", " ", s)
     s=re.sub(r'\s+',' ',s).strip()
@@ -382,102 +399,214 @@ def describe_product(p):
     return base
 
 def search_products(query, limit=8):
-    """Rank products by exact phrase, product terms, shade/variant, synonyms and typo similarity."""
+    """Robust Persian product search: exact names, normalized spelling, tokens and typo tolerance."""
     from difflib import SequenceMatcher
-    q=normalize_fa(query)
-    if not q: return []
-    stop={'برای','من','چی','چیه','کدام','خوب','مناسب','دارم','می خواهم','می','خواهم','محصول','محصولات','لطفا','یه','یک','از','به','با','را','و','یا','این','اون','است','هست','توی','داخل','فروشگاه','لیانا','بخرم','پیشنهاد','بده','بهترین','دارید','می شود','کنم','کنه','رو','چه','خبر'}
-    aliases={
-      'کرم پودر':['کرم پودر','کرمپودر','فوندیشن','foundation','بی بی کرم','bb کرم','سی سی کرم','cc کرم','کوشن'],
-      'فوندیشن':['کرم پودر','فوندیشن','کوشن'], 'رژ لب':['رژ لب','رژلب','لیپ گلاس','لیپگلاس','لیپ گلاس','برق لب','بالم لب','تینت لب','رژ مایع','رژ جامد'],
-      'لیپ گلاس':['لیپ گلاس','لیپگلاس','برق لب','lip gloss','گلاس لب'], 'برق لب':['برق لب','لیپ گلاس','لیپگلاس','گلاس لب'],
-      'بادی اسپلش':['بادی اسپلش','بادی‌اسپلش','بادیاسپلش','body splash','اسپری بدن','بادی اسپری'],
-      'بادی اسپری':['بادی اسپری','اسپری بدن','بادی اسپلش','بادی‌اسپلش'],
-      'لب':['رژ لب','لیپ گلاس','بالم لب','تینت لب','خط لب','رژ مایع'], 'ابرو':['مداد ابرو','ژل ابرو','صابون ابرو'],
-      'چشم':['ریمل','خط چشم','سایه','مداد چشم'], 'جوش':['جوش','آکنه','ضد جوش','سرم آکنه'],
-      'آبرسان':['آبرسان','مرطوب کننده','هیالورونیک','کرم آبرسان'], 'خشک':['آبرسان','مرطوب کننده','کرم دست'],
-      'چرب':['شوینده','فیس واش','ضد آفتاب'], 'ضد آفتاب':['ضد آفتاب','پنکیک spf','spf','ضدافتاب'],
-      'ناخن':['ناخن','لاک'], 'پاکسازی':['فیس واش','شوینده','پاک کننده','میسلار','تونر'],
-      'رنگ':['رژ لب','رژگونه','لاک','سایه'], 'عطر':['عطر','ادکلن','بادی اسپلش','بادی‌اسپلش','body splash'],
-      'خوشبوکننده':['عطر','ادکلن','بادی اسپلش','بادی‌اسپلش','بادی اسپری'], 'بادی اسپلش':['بادی اسپلش','بادی‌اسپلش','بادیاسپلش','body splash','بادی اسپری'],
-      'اسپلش':['بادی اسپلش','بادی‌اسپلش'], 'اسپری بدن':['بادی اسپلش','اسپری بدن','بادی اسپری'],
-      'تینت':['تینت','تینت لب','تینت گونه'], 'نمک بدن':['نمک بدن','اسکراب بدن'], 'کانسیلر':['کانسیلر','concealer'],
-      'پنکیک':['پنکیک','پودر فشرده'], 'مرطوب کننده':['مرطوب کننده','کرم آبرسان','لوسیون'],
-      'پاک کننده':['پاک کننده','پاک‌کننده','میسلار','شوینده','فیس واش'], 'شوینده':['شوینده','فیس واش','ژل شستشو','فوم شستشو'],
-      'عطر بدن':['بادی اسپلش','عطر','ادکلن'], 'رژگونه':['رژگونه','رژ گونه','بلشر','blush'],
-      'هایلایتر':['هایلایتر','highlighter'], 'پرایمر':['پرایمر','primer'], 'فیکساتور':['فیکساتور','اسپری فیکس','پودر فیکس'],
-      'مو':['مراقبت مو','ماسک مو','شامپو','سرم مو']
-    }
-    # Normalize common joined/separated cosmetic words before tokenization.
-    q=q.replace('بادیاسپلش','بادی اسپلش').replace('بادی‌اسپلش','بادی اسپلش').replace('لیپگلاس','لیپ گلاس').replace('رژلب','رژ لب').replace('کرمپودر','کرم پودر').replace('ضدافتاب','ضد آفتاب')
-    # Expand everyday terms into catalogue vocabulary; this helps requests like «یه خوشبوکننده می‌خوام».
-    expanded=set(q.split())
-    for key, vals in aliases.items():
-        if normalize_fa(key) in q or any(normalize_fa(v) in q for v in vals):
-            expanded.update(normalize_fa(v) for v in vals)
-    terms=[t for t in expanded if len(t)>1 and t not in stop]
-    # Category-oriented requests should surface the matching product family.
-    scored=[]
-    for item in DATA:
-        if not item.get('published',True): continue
-        name=normalize_fa(item.get('name','')); cat=normalize_fa(item.get('category',''))
-        variants=' '.join(normalize_fa((v.get('attribute') or v.get('name') or '')) for v in item.get('variants',[]))
-        hay=name+' '+cat+' '+variants
-        score=0
-        if q and q in name: score+=18
-        # Exact product-family intent should outrank incidental token matches.
-        family_aliases={
-          'بادی اسپلش':('بادی اسپلش','بادی‌اسپلش','بادیاسپلش','body splash'),
-          'لیپ گلاس':('لیپ گلاس','لیپگلاس','برق لب','lip gloss'), 'برق لب':('برق لب','لیپ گلاس','لیپگلاس'),
-          'تینت':('تینت',), 'کانسیلر':('کانسیلر',), 'پنکیک':('پنکیک',), 'نمک بدن':('نمک بدن',),
-          'رژگونه':('رژگونه','رژ گونه'), 'رژ لب':('رژ لب','رژلب','رژ مایع','رژ جامد'),
-          'ریمل':('ریمل',), 'عطر':('عطر','ادکلن','بادی اسپلش'), 'اسپری بدن':('بادی اسپلش','اسپری بدن','بادی اسپری'), 'لیپ گلاس':('لیپ گلاس','لیپگلاس','برق لب'), 'برق لب':('برق لب','لیپ گلاس','لیپگلاس')
-        }
-        for fam, markers in family_aliases.items():
-            if normalize_fa(fam) in q and any(normalize_fa(m) in name for m in markers): score+=14
-        if 'کانسیلر' in q and 'کانسیلر' in name and not any(x in name for x in ('پد کانسیلر','مثلثی','ابزار')): score+=10
-        for t in terms:
-            if t in name.split(): score+=8
-            elif t in name: score+=5
-            elif t in variants: score+=7
-            elif t in cat: score+=2
-            else:
-                # One-character chat typos and misspellings; compare only meaningful tokens.
-                best=max([SequenceMatcher(None,t,nt).ratio() for nt in name.split() if len(nt)>=3] or [0])
-                if len(t)>=4 and best>=0.82: score+=3
-        for t in terms:
-            for key, vals in aliases.items():
-                if t==key or t in key.split():
-                    if any(normalize_fa(v) in name for v in vals): score+=4
-        # Shade intent: if the catalogue has the shade as a variant/name, prioritize it.
-        shade_terms={'عسلی','نود','صورتی','قرمز','قهوه ای','قهوه‌ای','رز','هلویی','گلبهی','موکا','کاراملی','بژ','روشن','متوسط','تیره'}
-        for shade in shade_terms:
-            if shade in q and shade in hay: score+=12
-        if score: scored.append((score,item))
-    scored.sort(key=lambda z:(z[0],normalize_fa(z[1].get('name',''))),reverse=True)
-    # For a specific shade search, include products in the matching family if no exact shade variant is listed.
-    results=[item for score,item in scored if score>=3]
-    family_terms=[('بادی اسپلش',('بادی اسپلش','بادی‌اسپلش','بادیاسپلش','body splash')),('اسپری بدن',('بادی اسپلش','اسپری بدن','بادی اسپری')),('تینت',('تینت',)),('کانسیلر',('کانسیلر',)),('پنکیک',('پنکیک',)),('نمک بدن',('نمک بدن',)),('رژگونه',('رژگونه','رژ گونه')),('رژ لب',('رژ لب','رژلب','رژ مایع','رژ جامد')),('ریمل',('ریمل',)),('کرم پودر',('کرم پودر','کرمپودر','فوندیشن'))]
-    for family, markers in family_terms:
-        if family in q:
-            narrowed=[item for item in results if any(normalize_fa(m) in normalize_fa(item.get('name','')) for m in markers)]
-            if narrowed: results=narrowed
-            if family=='کانسیلر':
-                standalone=[item for item in results if 'کانسیلر' in normalize_fa(item.get('name','')) and not any(x in normalize_fa(item.get('name','')) for x in ('پد کانسیلر','مثلثی','ابزار'))]
-                if standalone: results=standalone
-            break
-    results=results[:limit]
-    if not results and terms:
-        # Last-resort family search, not a random catalogue dump.
-        family=[t for t in terms if t in aliases]
-        if family:
-            for item in DATA:
-                if not item.get('published',True): continue
-                name=normalize_fa(item.get('name',''))
-                if any(normalize_fa(v) in name for f in family for v in aliases[f]): results.append(item)
-                if len(results)>=limit: break
-    return results
+    q = normalize_fa(query)
+    if not q or len(q) < 2:
+        return []
 
+    # Normalize common joined terms consistently on both sides.
+    def search_norm(value):
+        value = normalize_fa(value)
+        replacements = (
+            ('بادیاسپلش', 'بادی اسپلش'), ('لیپگلاس', 'لیپ گلاس'),
+            ('رژلب', 'رژ لب'), ('کرمپودر', 'کرم پودر'),
+            ('ضدافتاب', 'ضد آفتاب'), ('ضدآفتاب', 'ضد آفتاب'),
+            ('فیسواش', 'فیس واش'), ('خطچشم', 'خط چشم'),
+            ('رژگونه', 'رژ گونه'), ('مدادابرو', 'مداد ابرو'),
+        )
+        for old, new_value in replacements:
+            value = value.replace(old, new_value)
+        return re.sub(r'\s+', ' ', value).strip()
+
+    q = search_norm(q)
+    stop = {'برای','من','چی','چیه','کدام','خوب','مناسب','دارم','می خواهم','می','خواهم',
+            'محصول','محصولات','لطفا','یه','یک','از','به','با','را','و','یا','این','اون',
+            'است','هست','توی','داخل','فروشگاه','لیانا','بخرم','پیشنهاد','بده','بهترین',
+            'دارید','می شود','کنم','کنه','رو','چه','خبر','میخوام','میخوام'}
+    aliases = {
+        'کرم پودر':['فوندیشن','foundation','بی بی کرم','bb کرم','سی سی کرم','cc کرم','کوشن'],
+        'رژ لب':['لیپ گلاس','لیپ گلاس','برق لب','بالم لب','تینت لب','رژ مایع','رژ جامد'],
+        'لیپ گلاس':['برق لب','lip gloss','گلاس لب'],
+        'بادی اسپلش':['body splash','اسپری بدن','بادی اسپری'],
+        'لب':['رژ لب','لیپ گلاس','بالم لب','تینت لب','خط لب','رژ مایع'],
+        'ابرو':['مداد ابرو','ژل ابرو','صابون ابرو'],
+        'چشم':['ریمل','خط چشم','سایه','مداد چشم'],
+        'جوش':['آکنه','ضد جوش','سرم آکنه'],
+        'آبرسان':['مرطوب کننده','هیالورونیک','کرم آبرسان'],
+        'ضد آفتاب':['پنکیک spf','spf'], 'ناخن':['لاک'],
+        'پاکسازی':['فیس واش','شوینده','پاک کننده','میسلار','تونر'],
+        'عطر':['ادکلن','بادی اسپلش','body splash'],
+        'خوشبوکننده':['عطر','ادکلن','بادی اسپلش','بادی اسپری'],
+        'تینت':['تینت لب','تینت گونه'], 'نمک بدن':['اسکراب بدن'],
+        'کانسیلر':['concealer'], 'پنکیک':['پودر فشرده'],
+        'مرطوب کننده':['کرم آبرسان','لوسیون'],
+        'شوینده':['فیس واش','ژل شستشو','فوم شستشو'],
+        'رژگونه':['بلشر','blush'], 'هایلایتر':['highlighter'],
+        'پرایمر':['primer'], 'فیکساتور':['اسپری فیکس','پودر فیکس'],
+        'مو':['مراقبت مو','ماسک مو','شامپو','سرم مو']
+    }
+    # Keep the query tokens ordered and stable (a set made ranking nondeterministic).
+    q_tokens = [t for t in q.split() if len(t) > 1 and t not in stop]
+    # Fast path for exact names. Keep every duplicate-name record visible instead of
+    # silently hiding a second catalog item with the same display name.
+    exact_matches = [item for item in DATA
+                     if item.get('published', True) and search_norm(item.get('name', '')) == q]
+    if exact_matches:
+        return exact_matches[:max(1, min(int(limit), 20))]
+    expanded = list(q_tokens)
+    for key, vals in aliases.items():
+        if search_norm(key) in q or any(search_norm(v) in q for v in vals):
+            expanded.extend(search_norm(v) for v in [key, *vals])
+    terms = list(dict.fromkeys(t for t in expanded if len(t) > 1 and t not in stop))
+
+    scored = []
+    for item in DATA:
+        if not item.get('published', True):
+            continue
+        name = search_norm(item.get('name', ''))
+        category = search_norm(item.get('category', ''))
+        variants = ' '.join(search_norm(v.get('attribute') or v.get('name') or '')
+                            for v in (item.get('variants') or []))
+        description = search_norm(item.get('description', ''))
+        hay = f'{name} {category} {variants} {description}'
+        score = 0
+        if q == name:
+            score += 1000
+        elif q in name:
+            score += 100
+        elif name and name in q:
+            score += 70
+
+        # Token coverage makes a product discoverable even when the customer omits
+        # package counts, brand words, or writes words in a different order.
+        matched = 0
+        for token in q_tokens:
+            if token in name.split():
+                score += 22; matched += 1
+            elif token in name:
+                score += 15; matched += 1
+            elif token in variants:
+                score += 12; matched += 1
+            elif token in category:
+                score += 5; matched += 1
+            elif token in description:
+                score += 2; matched += 1
+            else:
+                best = max((SequenceMatcher(None, token, nt).ratio()
+                            for nt in name.split() if len(nt) >= 3), default=0)
+                if len(token) >= 4 and best >= 0.80:
+                    score += 5; matched += 1
+        if q_tokens and matched == len(q_tokens):
+            score += 12
+        elif q_tokens and matched:
+            score += int(10 * matched / len(q_tokens))
+
+        # Expand category/family requests, but avoid blindly returning unrelated products.
+        for key, vals in aliases.items():
+            if search_norm(key) in q or any(search_norm(v) in q for v in vals):
+                if any(search_norm(term) in name for term in [key, *vals]):
+                    score += 18
+
+        if score > 0:
+            scored.append((score, name, item))
+
+    # Stable tie-break: exact/product-name matches first, then alphabetical.
+    scored.sort(key=lambda x: (-x[0], x[1]))
+    results = [item for _, _, item in scored]
+    return results[:max(1, min(int(limit), 20))]
+
+
+
+# Recognized shopping intents. Each family has phrases customers may use; matches are
+# filtered back to actual catalog names so a request for lip gloss does not show tools.
+PRODUCT_INTENTS = [
+    ('ضد آفتاب', ('ضد آفتاب','ضدافتاب','ضدآفتاب','ضد افتاب','sunscreen')),
+    ('بادی اسپلش', ('بادی اسپلش','بادیاسپلش','بادی اسپری','اسپری بدن','خوشبوکننده بدن')),
+    ('لیپ گلاس', ('لیپ گلاس','لیپگلاس','برق لب','گلاس لب','lip gloss')),
+    ('رژ لب', ('رژ لب','رژلب','رژ مایع','رژ جامد','رژ مات','رژ براق')),
+    ('تینت', ('تینت','تینت لب','تینت گونه')),
+    ('خط لب', ('خط لب','مداد لب')),
+    ('بالم لب', ('بالم لب','مرطوب کننده لب')),
+    ('رژگونه', ('رژگونه','رژ گونه','بلشر')),
+    ('ریمل', ('ریمل','mascara')),
+    ('خط چشم', ('خط چشم','خطچشم','eyeliner')),
+    ('مداد ابرو', ('مداد ابرو','مدادابرو')),
+    ('ابرو', ('ژل ابرو','صابون ابرو','لیفت ابرو')),
+    ('کانسیلر', ('کانسیلر','concealer')),
+    ('کرم پودر', ('کرم پودر','کرمپودر','فوندیشن','foundation','بی بی کرم','سی سی کرم','کوشن')),
+    ('پنکیک', ('پنکیک','پودر فشرده')),
+    ('پرایمر', ('پرایمر','primer')),
+    ('پودر فیکس', ('پودر فیکس','فیکساتور','اسپری فیکس')),
+    ('آبرسان', ('آبرسان','هیالورونیک','مرطوب کننده','مرطوب‌کننده')),
+    ('شوینده', ('شوینده','فیس واش','فیسواش','ژل شستشو','فوم شستشو','پاک کننده صورت')),
+    ('ضد جوش', ('ضد جوش','آکنه','جوش صورت','سرم جوش')),
+    ('نمک بدن', ('نمک بدن','اسکراب بدن')),
+    ('شامپو', ('شامپو','مراقبت مو','ماسک مو','سرم مو')),
+    ('عطر', ('عطر','ادکلن','eau de parfum')),
+    ('لاک ناخن', ('لاک ناخن','لاک','ناخن مصنوعی','ناخن بچه گانه')),
+    ('براش', ('براش','قلم مو آرایشی','ست براش')),
+]
+
+def intent_families(query):
+    q=normalize_fa(query)
+    found=[]
+    for family, markers in PRODUCT_INTENTS:
+        normalized_markers=[normalize_fa(x) for x in markers]
+        if any(marker and marker in q for marker in normalized_markers):
+            found.append((family, markers))
+    # Preserve phrase order but don't return the same family twice.
+    out=[]; seen=set()
+    for family,markers in found:
+        if family not in seen:
+            seen.add(family); out.append((family,markers))
+    return out
+
+def intent_products(query, limit=8):
+    """Extract multiple product needs from a full message and return real catalog items."""
+    q=normalize_fa(query)
+    if not q:
+        return []
+    out=[]; seen=set()
+    # A full product name inside a conversational sentence has highest priority.
+    for p in product_name_matches(q):
+        pid=str(p.get('id',''))
+        if pid not in seen:
+            out.append(p); seen.add(pid)
+        if len(out)>=limit:
+            return out[:limit]
+    families=intent_families(q)
+    if not families:
+        return out
+    per_family=max(2, min(4, limit//max(1,len(families))))
+    for family, markers in families:
+        candidates=search_products(family,20)
+        strict=[]
+        normalized_markers=[normalize_fa(x) for x in markers]
+        for p in candidates:
+            if not p.get('published',True):
+                continue
+            name=normalize_fa(p.get('name',''))
+            category=normalize_fa(p.get('category',''))
+            # A category-level family may use a synonym rather than the literal family name.
+            if any(m and m in name for m in normalized_markers):
+                strict.append(p)
+            elif family in ('آبرسان','شوینده','شامپو','لاک ناخن','ابرو','ضد جوش') and any(m and m in category for m in normalized_markers):
+                strict.append(p)
+        if not strict:
+            # Keep a conservative fallback from search ranking rather than returning no help.
+            strict=[p for p in candidates if p.get('published',True)]
+        added=0
+        for p in strict:
+            pid=str(p.get('id',''))
+            if pid in seen:
+                continue
+            out.append(p); seen.add(pid); added+=1
+            if len(out)>=limit or added>=per_family:
+                break
+        if len(out)>=limit:
+            break
+    return out[:max(1,min(int(limit),20))]
 
 def related_products(p, limit=3):
     """Return related items from the same use/category without duplicating the original."""
@@ -500,33 +629,38 @@ def related_products(p, limit=3):
     return [x[1] for x in ranked[:limit]]
 
 def conversational_keyboard(user_text:str, history:list, answer:str):
-    """Add tappable product cards and store-information actions to AI replies."""
+    """Attach real product detail and direct product-page buttons to relevant AI answers."""
     q=normalize_fa(contextual_query(user_text,history or []))
     a=normalize_fa(answer)
     rows=[]; products=[]; seen=set()
-    # Prefer product names explicitly mentioned in the answer, then fill from ranked search.
+    # Prefer products the answer explicitly names.
     for p in DATA:
-        if not p.get('published',True): continue
+        if not p.get('published',True):
+            continue
         name=normalize_fa(p.get('name',''))
         if len(name)>=5 and name in a and str(p.get('id')) not in seen:
             products.append(p); seen.add(str(p.get('id')))
-            if len(products)>=5: break
-    product_intent=any(x in q for x in ('تینت','کانسیلر','پنکیک','رژ لب','رژلب','کرم پودر','کرمپودر','رژگونه','ریمل','نمک بدن','آبرسان','مرطوب کننده','لیپ گلاس','لیپگلاس','برق لب','بادی اسپلش','بادیاسپلش','بادی اسپری','اسپری بدن','عطر','ادکلن','محصول','پیشنهاد','بهترین','دارید','قیمت','موجودی'))
-    if product_intent and len(products)<5:
-        for p in search_products(q,8):
+            if len(products)>=5:
+                break
+    # Then use all product families inferred from the whole message, not just its first keyword.
+    if len(products)<5:
+        for p in intent_products(q, 8):
             pid=str(p.get('id'))
             if pid not in seen:
                 products.append(p); seen.add(pid)
-            if len(products)>=5: break
+            if len(products)>=5:
+                break
     for p in products[:5]:
-        rows.append([btn('🧴 '+str(p.get('name','محصول'))[:48],f"product:{p['id']}")])
+        row=[btn('🧴 '+str(p.get('name','محصول'))[:42],f"product:{p['id']}")]
+        url=str(p.get('product_url') or '').strip()
+        if url.startswith(('https://','http://')):
+            row.append(btn('🔗 صفحه محصول',url=url))
+        rows.append(row)
     store_intent=any(x in q for x in ('فروشگاه','لیانا','آدرس','شماره تماس','شماره فروشگاه','ساعت کاری','شعبه','ارسال','سفارش','اطلاعات فروشگاه','کجاست','کجا هستید'))
     if store_intent:
         rows.append([btn('🏬 اطلاعات کامل فروشگاه','shop'),btn('🛒 سایت فروشگاه',url=SHOP_URL)])
-    if rows:
-        rows.append([btn('↩️ ادامه گفت‌وگو','ai:continue'),btn('🏠 خانه','home')])
-        return InlineKeyboardMarkup(inline_keyboard=rows)
-    return ai_kb()
+    rows.append([btn('↩️ ادامه گفت‌وگو','ai:continue'),btn('🏠 خانه','home')])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def knowledge_answer(q:str):
     """Semantic-ish offline retrieval: normalize colloquial Persian, expand synonyms,
@@ -811,7 +945,7 @@ def offline_answer(user_text:str, history=None)->str:
                 for item in matches[:5]:
                     price=money_toman((item.get('variants') or [{}])[0].get('price_raw'))
                     lines.append('🧴 <b>'+esc(item.get('name','محصول'))+'</b>'+(' — '+esc(price) if price else ''))
-                return '🔎 از روی کلمات کلیدی پیامت، این محصولات مرتبط رو در لیانا پیدا کردم 🌷\\n\\n'+'\\n'.join(lines)+'\\n\\nبرای دیدن جزئیات هر محصول روی دکمه‌اش بزن. اگر رایحه، کاربرد یا بودجه‌ی خاصی مدنظرت هست بگو تا پیشنهادها رو دقیق‌تر کنم.'
+                return '🔎 از روی کلمات کلیدی پیامت، این محصولات مرتبط رو در لیانا پیدا کردم 🌷\n\n'+'\n'.join(lines)+'\n\nبرای دیدن جزئیات و صفحه مستقیم هر محصول از دکمه‌های زیر استفاده کن. اگر کاربرد یا بودجه‌ی خاصی مدنظرت هست بگو تا پیشنهادها رو دقیق‌تر کنم.'
     return '🌸 من دستیار لیانا شاپ هستم و می‌تونم درباره آرایش، مراقبت پوست و مو، انتخاب محصولات، قیمت و موجودی، آدرس فروشگاه و خرید راهنمایی‌ات کنم. مثلاً بنویس «یه تینت لب خوب می‌خوام»، «برای پوست چرب چی مناسبه؟» یا «یه بادی‌اسپلش خوشبو معرفی کن». اگر منظورت محصول خاصیه، اسم یا کاربردش رو بگو تا داخل محصولات لیانا جست‌وجو کنم.'
 
 async def call_groq(user_text:str, history=None):
@@ -836,7 +970,7 @@ async def call_groq(user_text:str, history=None):
       'برای پیشنهاد محصول، ابتدا نیاز و نوع پوست/تناژ/بودجه مشتری را در نظر بگیر؛ اگر کافی نیست یک سؤال کوتاه بپرس. '
       'قیمت و موجودی ممکن است تغییر کند؛ فقط اعداد و وضعیت موجود در داده مرتبط را گزارش کن و برای تأیید نهایی ارجاع به فروشگاه بده. '
       'از ادعاهای پزشکی قطعی پرهیز کن، در حساسیت شدید یا مشکلات پوستی ماندگار مراجعه به متخصص را پیشنهاد بده. '
-      'کوتاه، کاربردی، گرم و حرفه‌ای بنویس؛ هر بار جمله‌بندی را متنوع کن و پاسخ کلیشه‌ای تکراری نده. پیام‌های اجتماعی مثل دوستت دارم، اوکی، چه خبر و تشکر را طبیعی و متناسب پاسخ بده. اگر کاربر بهترین تینت/محصول را خواست، از محصولات مرتبط موجود چند گزینه نام ببر و ویژگی عمومی همان دسته را توضیح بده. برای رنگ کانسیلر/پنکیک/رژلب، اگر نوع پوست، رنگ و تناژ کافی نیست یک سؤال کوتاه بپرس. برای درخواست محصول مرتبط، مکمل‌های مناسب را از فهرست محصولات پیدا کن. پاسخ را به شکل فروشنده واقعی ارائه کن و درباره روش فنی دریافت اطلاعات توضیح نده.'
+      'پاسخ را مفهوم، مشخص و متناسب با سؤال بنویس؛ هر بار جمله‌بندی را طبیعی و متفاوت کن. در صورت تناسب از ۱ تا ۳ ایموجی مرتبط مثل 🌷✨💄🧴 استفاده کن، اما ایموجی را جای اطلاعات دقیق نگذار و استیکر یا اطلاعات ساختگی ادعا نکن. پیام‌های اجتماعی مثل دوستت دارم، اوکی، چه خبر و تشکر را طبیعی و متناسب پاسخ بده. اگر کاربر بهترین تینت/محصول را خواست، از محصولات مرتبط موجود چند گزینه نام ببر و ویژگی عمومی همان دسته را توضیح بده. برای رنگ کانسیلر/پنکیک/رژلب، اگر نوع پوست، رنگ و تناژ کافی نیست یک سؤال کوتاه بپرس. برای درخواست محصول مرتبط، مکمل‌های مناسب را از فهرست محصولات پیدا کن. پاسخ را به شکل فروشنده واقعی ارائه کن و درباره روش فنی دریافت اطلاعات توضیح نده.'
     )
     context='اطلاعات مرتبط محصولات فروشگاه (فقط برای راهنمایی دقیق؛ این داده‌ها را به شکل فایل یا منبع فنی به مشتری معرفی نکن):\n'+json.dumps(products,ensure_ascii=False)
     if kb_answer:
@@ -904,7 +1038,6 @@ async def text_search(m:Message):
         return
     if uid in AI_USERS and not q.startswith('/'):
         if len(q)<2: return
-        owner_mode=(uid in OWNER_AI_USERS and is_owner_id(uid))
         history=history_get(uid)
         interpreted=contextual_query(q,history)
         # Let greetings, casual conversation, store questions and recommendation requests reach intent handling.
@@ -916,23 +1049,26 @@ async def text_search(m:Message):
         await m.answer(esc(answer),reply_markup=conversational_keyboard(q,history,answer))
         return
     if q.startswith('/') or len(q)<2: return
-    # Keep direct product-name lookup for short, name-like queries. Natural-language
-    # questions should go through the same intent understanding even when the user
-    # has not explicitly opened AI chat from the menu.
-    found=[p for p in DATA if normalize_fa(q) in normalize_fa(p['name']) and p.get('published',True)][:40]
-    is_name_query = len(normalize_fa(q).split()) <= 3 and not any(x in normalize_fa(q) for x in (
-        'می خواهم','می خواستم','پیشنهاد','معرفی','خوب','مناسب','چی','چطور','چگونه','برای من','بهترین','دارید','بخرم','می شود'
-    ))
-    if found and is_name_query:
-      await m.answer(f"🔎 <b>{len(found)}</b> نتیجه برای «{esc(q)}» (حداکثر ۴۰ نتیجه):",reply_markup=paginated(found,0,'searchpage:'+quote(q,safe='')))
-      return
-    # Always answer conversational questions, not just exact product names. This makes
-    # messages like «یه بادی اسپلش خوب معرفی کن» work from the normal chat too.
-    history=history_get(uid)
-    answer=await call_groq(q,history=history)
-    history_add(uid,'user',q)
-    history_add(uid,'assistant',answer)
-    await m.answer(esc(answer),reply_markup=conversational_keyboard(q,history,answer))
+    # Outside AI mode, keep behavior deterministic: search the real product catalog only.
+    # AI is activated exclusively by the explicit "گفت‌وگو با هوش مصنوعی" button.
+    matches = search_products(q, limit=8)
+    if matches:
+        rows = []
+        for p in matches:
+            rows.append([btn("🧴 " + p.get("name", "محصول")[:55], f"product:{p['id']}")])
+        rows.append(nav_row())
+        await m.answer(
+            "🔎 <b>نتایج جست‌وجو در محصولات لیانا</b>\n"
+            "محصول موردنظرت رو از فهرست انتخاب کن تا جزئیات، تنوع‌ها و راه استعلام قیمت رو ببینی 🌷",
+            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows)
+        )
+        return
+    await m.answer(
+        "🌷 محصولی با این عبارت پیدا نکردم. اسم محصول رو کوتاه‌تر یا با املای دیگه بنویس؛ "
+        "مثلاً «ریمل»، «بادی اسپلش» یا «مداد ابرو».\n\n"
+        "برای پرسش‌های عمومی و پیشنهاد هوشمند، اول از منوی خانه دکمه «گفت‌وگو با هوش مصنوعی» رو بزن.",
+        reply_markup=home_kb()
+    )
 @dp.callback_query(F.data=='home')
 async def cb_home(c:CallbackQuery):
     AI_USERS.discard(c.from_user.id)
@@ -968,7 +1104,7 @@ async def cb_catpage(c:CallbackQuery):
 @dp.callback_query(F.data.startswith('searchpage:'))
 async def cb_searchpage(c:CallbackQuery):
     _,page,query=c.data.split(':',2); page=int(page); query=__import__('urllib.parse').parse.unquote(query)
-    items=[p for p in DATA if normalize_fa(query) in normalize_fa(p['name']) and p.get('published',True)][:40]
+    items=search_products(query, limit=40)
     await c.message.edit_text(f"🔎 نتایج جست‌وجو برای «{esc(query)}»",reply_markup=paginated(items,page,'searchpage:'+quote(query,safe=''))); await c.answer()
 @dp.callback_query(F.data.startswith('qpage:'))
 async def cb_qpage(c:CallbackQuery):
@@ -1028,11 +1164,18 @@ async def cb_ask(c:CallbackQuery):
         text=(f"<b>📦 وضعیت موجودی</b>\n\nمحصول: <b>{esc(p['name'])}</b>\nوضعیت: <b>{esc(status)}</b>")
         if lines: text += '\n\n'+'\n'.join(lines)
         text += '\n\n<i>ممکن است این وضعیت با موجودی لحظه‌ای فروشگاه فرق داشته باشد.</i>'
-    kb=InlineKeyboardMarkup(inline_keyboard=[[btn('📞 شماره شعبه ۱','phone:1'),btn('📞 شماره شعبه ۲','phone:2')],[btn('🔗 صفحه محصول',url=p['product_url'])],nav_row()])
+    rows=[[btn('📞 شماره شعبه ۱','phone:1'),btn('📞 شماره شعبه ۲','phone:2')]]
+    product_url=str(p.get('product_url') or '').strip()
+    if product_url.startswith(('https://','http://')):
+        rows.append([btn('🔗 صفحه محصول',url=product_url)])
+    rows.append(nav_row())
+    kb=InlineKeyboardMarkup(inline_keyboard=rows)
     await c.message.answer(text,reply_markup=kb); await c.answer()
 
 async def main():
     init_db()
+    if not isinstance(DATA, list):
+        raise SystemExit('products.json باید فهرستی از محصولات باشد.')
     if not TOKEN: raise SystemExit('BOT_TOKEN را در فایل .env وارد کن؛ از BotFather دریافت می‌شود.')
     await dp.start_polling(bot)
 if __name__=='__main__': asyncio.run(main())
