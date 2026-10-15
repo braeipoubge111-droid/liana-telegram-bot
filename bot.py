@@ -86,19 +86,23 @@ def variant_lines(p):
     return out
 
 def product_text(p):
-    desc=p.get('description','').strip()
-    if not desc or len(desc)<180 or any(x in desc for x in ('این کالا در گروه','این محصول در دسته','برای مراقبت از پوست در روتین روزانه','محصول مراقبت پوستی با کاربردی','نام محصول برای معرفی کلی','ترکیبات، رایحه، بافت')): desc=describe_product(p)
+    """Show only catalog facts; avoid generic or unverified generated product bios."""
     variants=p.get('variants',[])
-    opt=''
-    if variants:
-      labels=[]
-      for v in variants[:8]:
-        a=v.get('attribute') or v.get('name','')
-        if a and a not in labels: labels.append(a)
-      if labels: opt='\n\n<b>تنوع‌ها:</b> '+ '، '.join(labels)
+    lines=[f"<b>✨ {esc(p.get('name','محصول'))}</b>"]
+    if p.get('category'):
+        lines.append('<b>دسته‌بندی:</b> '+esc(p.get('category')))
+    labels=[]
+    for v in variants[:12]:
+        attr=(v.get('attribute') or v.get('name') or '').strip()
+        if attr and attr not in labels: labels.append(attr)
+    if labels:
+        lines.append('\n<b>تنوع‌های ثبت‌شده:</b> '+ '، '.join(esc(x) for x in labels))
     prices=variant_lines(p)
-    price_text=('\n\n<b>قیمت و تنوع:</b>\n'+'\n'.join(prices)) if prices else ''
-    return f"<b>✨ {esc(p['name'])}</b>\n\n{esc(desc[:1200])}{opt}{price_text}"
+    if prices:
+        lines.append('\n<b>قیمت و وضعیت:</b>\n'+'\n'.join(prices))
+    lines.append('\nبرای رنگ، ترکیبات یا ویژگی‌هایی که اینجا مشخص نشده‌اند، تصویر و توضیحات بسته‌بندی محصول را بررسی کن.')
+    return '\n'.join(lines)
+
 def esc(s):
     import html
     return html.escape(str(s or ''))
@@ -683,6 +687,10 @@ def offline_answer(user_text:str, history=None)->str:
     if talk=='thanks': return random.choice(('خواهش می‌کنم 💗 سؤال دیگه‌ای درباره محصولات داشتی بپرس.','قربونت 🌷 خوشحالم کمک کردم.','خواهش می‌کنم! 🌸'))
     if talk=='positive': return random.choice(('خوشحالم که به کارت اومد 🌷 هر سؤال دیگه‌ای درباره محصولات یا آرایش داشتی بپرس.','قربونت 💗 برای انتخاب محصول یا پیدا کردن قیمت و موجودی هم کمکت می‌کنم.'))
     if talk=='casual': return random.choice(('من اینجام که درباره محصولات و خرید از لیانا کمکت کنم 😊 تو بگو دنبال چه چیزی هستی؟','فعلاً کارم راهنمایی درباره آرایش و محصولات لیاناست 🌷 چیزی می‌خوای برات پیدا کنم؟'))
+    if any(x in q for x in ('چی پیشنهاد میدی','چه پیشنهاد میدی','چی پیشنهاد می دهی','چه چیزی پیشنهاد','پیشنهادت چیه','من چی بخرم','چی خوبه برام')):
+        return 'با کمال میل 🌷 دوست داری از بین محصولات لیانا چی پیشنهاد بدم؟ مثلاً آرایش لب، آرایش صورت، عطر و بادی‌اسپلش یا مراقبت پوست؟ اگر برای پوستته، نوع پوستت رو هم بگو تا انتخاب دقیق‌تری داشته باشیم.'
+    if any(x in q for x in ('دوستت دارم','عاشقتم')):
+        return random.choice(('چه مهربون گفتی 💗 منم خوشحالم که می‌تونم کمکت کنم!','قربون محبتت 🌷 بگو امروز دنبال چه چیزی هستی؟','چه انرژی قشنگی 💕 هر وقت خواستی برای انتخاب محصول کمکت می‌کنم.'))
     if any(x in q for x in ('معرفی فروشگاه','اطلاعات فروشگاه','اطلاعات لیانا','معرفی کن','فروشگاه رو معرفی','درباره فروشگاه','آدرس فروشگاه','کجاست فروشگاه','کجا هستید','شماره فروشگاه','شماره تماس','شعبه های فروشگاه','شعبه های لیانا')):
         return ('🌸 فروشگاه آرایشی و بهداشتی لیانا در بندر گناوه دو شعبه دارد:\n\n📍 شعبه اول: پارکینگ ملت، راسته اصلی، بعد از داروخانه شبانه‌روزی دکتر معرفت، آخرین مغازه سمت راست.\n📍 شعبه دوم: پارکینگ ملت، پاساژ جام جم، پلاک ۱۰.\n\n🛍 سایت فروشگاه: '+SHOP_URL+'\n☎️ برای قیمت و موجودی روز می‌تونی با فروشگاه تماس بگیری: '+PHONE_1+' یا '+PHONE_2)
     if any(x in q for x in ('ساعت کاری','چه ساعتی باز','کی باز','باز هستید','تا چه ساعتی')):
@@ -819,9 +827,7 @@ async def text_search(m:Message):
         owner_mode=(uid in OWNER_AI_USERS and is_owner_id(uid))
         history=history_get(uid)
         interpreted=contextual_query(q,history)
-        if not is_beauty_question(q) and interpreted==q:
-            await m.answer('🌸 من فقط درباره محصولات آرایشی و بهداشتی فروشگاه لیانا شاپ کمک می‌کنم. لطفاً درباره محصول، نوع پوست، رنگ، قیمت یا موجودی سؤال بپرس.\n\n',reply_markup=ai_kb())
-            return
+        # Let greetings, casual conversation, store questions and recommendation requests reach intent handling.
         answer=await call_groq(q,history=history)
         history_add(uid,'user',q)
         history_add(uid,'assistant',answer)
