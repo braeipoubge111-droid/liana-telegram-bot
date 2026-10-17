@@ -1,4 +1,4 @@
-import asyncio, json, os, re, sqlite3, time, csv
+import asyncio, csv, io, json, os, re, sqlite3, time
 from pathlib import Path
 from urllib.parse import quote
 from dotenv import load_dotenv
@@ -18,6 +18,8 @@ TG_URL=os.getenv("TELEGRAM_URL", "https://t.me/liyanashop_ir").strip()
 RUBIKA_URL=os.getenv("RUBIKA_URL", "https://rubika.ir/liyanashop_gnv").strip()
 GROQ_API_KEY=os.getenv("GROQ_API_KEY", "").strip()
 GROQ_MODEL=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip()
+PRODUCTS_CSV_URL=os.getenv("PRODUCTS_CSV_URL", "").strip()
+CSV_REFRESH_SECONDS=max(60, int(os.getenv("CSV_REFRESH_SECONDS", "600")))
 OWNER_TELEGRAM_ID=os.getenv("OWNER_TELEGRAM_ID", "").strip()
 OWNER_PASSWORD=os.getenv("OWNER_PASSWORD", "").strip()
 AI_WEEKLY_LIMIT=3
@@ -25,115 +27,135 @@ DB_PATH=Path(__file__).with_name("bot_data.sqlite3")
 AI_USERS=set()                 # users currently chatting with AI
 OWNER_PASSWORD_PENDING=set()   # owner IDs currently entering password
 OWNER_AI_USERS=set()           # owner IDs authenticated for AI testing
-def _clean(value):
-    return str(value or "").replace("\ufeff", "").strip()
+DATA=json.loads(Path(__file__).with_name("products.json").read_text(encoding="utf-8"))
 
-def _norm_header(value):
-    return re.sub(r"[\u200c\u200f\u200e\s]+", "", _clean(value))
-
-def _row_value(row, *names):
-    by_norm = {_norm_header(k): v for k, v in row.items()}
+# محصولات فایل CSV ووکامرس به کاتالوگ اصلی اضافه/به‌روزرسانی می‌شوند.
+# منبع CSV می‌تواند فایل research_queue.csv کنار bot.py یا آدرس فید در PRODUCTS_CSV_URL باشد.
+def _csv_value(row, *names):
     for name in names:
-        value = by_norm.get(_norm_header(name))
-        if value is not None and _clean(value):
-            return _clean(value)
+        val = row.get(name)
+        if val is not None and str(val).strip(): return str(val).strip()
     return ""
 
-def _is_true(value):
-    return _clean(value).lower() in {"1", "yes", "true", "publish", "published", "بله"}
+def _truthy(value):
+    return str(value or "").strip().lower() in {"1", "yes", "true", "publish", "published", "بله", "موجود"}
 
-def _category_from_csv(raw, name=""):
-    parts = [x.strip() for x in _clean(raw).split(",") if x.strip()]
-    cat = parts[-1] if parts else ""
-    cat = re.sub(r"^.*\s>\s*", "", cat).strip()
-    if not cat or cat in {"عمده", "آرایشی عمده", "عمده آرایشی", "عمده/آرایشی"}:
-        n = name
-        if any(k in n for k in ("ضدافتاب", "ضد آفتاب")): return "ضدآفتاب"
-        if any(k in n for k in ("شامپو", "ماسک مو", "موبر", "موچین", "برس مو")): return "مراقبت مو"
-        if any(k in n for k in ("عطر", "بادی اسپلش", "مام ", "دئودورانت", "اسپری بدن")): return "عطر و بهداشت بدن"
-        if any(k in n for k in ("رژ لب", "رژلب", "لیپ", "بالم لب", "تینت لب", "خط لب")): return "محصولات لب"
-        if any(k in n for k in ("ریمل", "خط چشم", "مداد چشم", "ابرو", "سایه چشم")): return "چشم و ابرو"
-        if any(k in n for k in ("کرم", "سرم", "تونر", "آبرسان", "مرطوب", "شوینده", "ماسک صورت")): return "مراقبت پوست"
-        if any(k in n for k in ("رژگونه", "کانسیلر", "کوشن", "پنکک", "کرم پودر", "پرایمر", "هایلایتر", "پودر فیکس")): return "آرایش صورت"
-        return "سایر محصولات"
-    return cat
+def _guess_category(name, raw_category=""):
+    text=normalize_fa((name or "")+" "+(raw_category or ""))
+    rules=[
+      ("ضدآفتاب", ["ضد افتاب","ضدآفتاب","spf"]),
+      ("مراقبت پوست", ["کرم","سرم","مرطوب کننده","آبرسان","ماسک صورت","تونر","اسکراب","زانو","آرنج","دور چشم","پاکسازی"]),
+      ("پاک‌کننده و شوینده", ["شوینده","فوم شستشو","ژل شستشو","میسلار","پاک کننده","صابون"]),
+      ("آرایش لب", ["رژ لب","رژلب","بالم لب","برق لب","تینت لب","خط لب","لیپ گلاس","lip gloss"]),
+      ("آرایش چشم و ابرو", ["ریمل","خط چشم","سایه چشم","مداد چشم","ابرو","مژه"]),
+      ("آرایش صورت", ["کرم پودر","پنکک","کانسیلر","رژگونه","هایلایتر","پرایمر","کانتور","پودر فیکس"]),
+      ("عطر و خوشبوکننده", ["عطر","ادکلن","بادی اسپلش","اسپری خوشبو","پرفیوم"]),
+      ("بهداشت شخصی", ["دست","ناخن","شامپو","مام رول","دئودورانت","بهداشت","مسواک"]),
+    ]
+    for cat, words in rules:
+        if any(normalize_fa(w) in text for w in words): return cat
+    # از دسته‌بندی فروشگاه استفاده کن، اما نام‌های کلی عمده را به مشتری نشان نده.
+    raw=(raw_category.split(",")[0].split(">")[-1].strip() if raw_category else "")
+    if raw and normalize_fa(raw) not in {"عمده","آرایشی عمده","محصولات","همه محصولات"}: return raw
+    return "سایر محصولات"
 
-def _price_for(row):
-    return _row_value(row, "قیمت فروش ویژه") or _row_value(row, "قیمت عادی")
+def _parse_woo_csv(raw_text):
+    reader=csv.DictReader(io.StringIO(raw_text.lstrip("\ufeff")))
+    rows=list(reader)
+    if not reader.fieldnames or not any("نام" in str(x) for x in reader.fieldnames):
+        raise ValueError("ستون نام در CSV پیدا نشد؛ لینک باید خروجی CSV محصولات ووکامرس باشد.")
+    base=[]; by_id={}; variations={}
+    for row in rows:
+        pid=_csv_value(row,"شناسه")
+        name=_csv_value(row,"نام")
+        typ=_csv_value(row,"نوع").lower()
+        parent=_csv_value(row,"مادر")
+        if typ=="variation" or (parent and not name):
+            if parent:
+                variations.setdefault(parent,[]).append(row)
+            continue
+        if not name or not pid: continue
+        if not _truthy(_csv_value(row,"منتشر شده")): continue
+        rawcat=_csv_value(row,"دسته‌ها","دسته ها")
+        stockraw=_csv_value(row,"در انبار؟")
+        stock="موجود" if _truthy(stockraw) else ("ناموجود" if stockraw else "نامشخص")
+        regular=_csv_value(row,"قیمت عادی")
+        sale=_csv_value(row,"قیمت فروش ویژه")
+        price=sale or regular
+        img=_csv_value(row,"تصاویر").split(",")[0].strip()
+        if img.startswith("http://"): img="https://"+img[7:]
+        desc=_csv_value(row,"توضیحات","توضیح کوتاه")
+        url=SHOP_URL.rstrip("/")+"/?s="+quote(name)+"&post_type=product"
+        variants=[]
+        attr_name=_csv_value(row,"نام 1 صفت","نام 2 صفت","نام 3 صفت")
+        attr_val=_csv_value(row,"مقدار(های) 1 صفت","مقدار(های) 2 صفت","مقدار(های) 3 صفت")
+        if attr_val or price:
+            variants.append({"id":pid,"name":name+(" - "+attr_val if attr_val else ""),"price_raw":price,"stock_file":stock,"attribute":attr_val or attr_name or ""})
+        prod={"id":pid,"sku":_csv_value(row,"شناسه محصول"),"name":name,"category":_guess_category(name,rawcat),"description":desc,"image":img,"published":True,"stock_file":stock,"variants":variants,"product_url":url,"csv_imported":True}
+        base.append(prod); by_id[pid]=prod
+    for parent, vrows in variations.items():
+        if parent not in by_id: continue
+        prod=by_id[parent]
+        for row in vrows:
+            vid=_csv_value(row,"شناسه")
+            price=_csv_value(row,"قیمت فروش ویژه") or _csv_value(row,"قیمت عادی")
+            attr=[]
+            for i in range(1,11):
+                val=_csv_value(row,f"مقدار(های) {i} صفت")
+                if val: attr.append(val)
+            stock="موجود" if _truthy(_csv_value(row,"در انبار؟")) else "ناموجود"
+            prod.setdefault("variants",[]).append({"id":vid,"name":prod["name"]+(" - "+"، ".join(attr) if attr else ""),"price_raw":price,"stock_file":stock,"attribute":"، ".join(attr)})
+    return base
 
-def load_product_catalog():
-    """Load latest WooCommerce CSV export when present; otherwise use products.json."""
-    base = Path(__file__).with_name("products.json")
-    csv_path = Path(__file__).with_name("research_queue.csv")
-    existing = {}
+def _merge_csv_products(csv_products):
+    # داده‌های معرفی‌شده در products.json حفظ می‌شوند؛ اطلاعات تازه CSV (قیمت/موجودی/تصویر/تنوع) به‌روز می‌شود.
+    existing={str(p.get("id")):p for p in DATA if isinstance(p,dict) and p.get("id") is not None}
+    merged=list(DATA)
+    for fresh in csv_products:
+        pid=str(fresh["id"]); old=existing.get(pid)
+        if old:
+            old["name"]=fresh.get("name") or old.get("name")
+            old["category"]=fresh.get("category") or old.get("category")
+            old["image"]=fresh.get("image") or old.get("image")
+            old["stock_file"]=fresh.get("stock_file") or old.get("stock_file")
+            old["product_url"]=fresh.get("product_url") or old.get("product_url")
+            if fresh.get("variants"): old["variants"]=fresh["variants"]
+            if fresh.get("description") and not old.get("description"): old["description"]=fresh["description"]
+        else:
+            merged.append(fresh)
+    DATA[:] = merged
+    return len(csv_products)
+
+def load_local_csv():
+    path=Path(__file__).with_name("research_queue.csv")
+    if not path.exists(): return 0
     try:
-        old = json.loads(base.read_text(encoding="utf-8"))
-        if isinstance(old, list): existing = {str(p.get("id")): p for p in old if isinstance(p, dict)}
-    except Exception:
-        old = []
+        return _merge_csv_products(_parse_woo_csv(path.read_text(encoding="utf-8-sig")))
+    except Exception as e:
+        print(f"[CSV] خطا در خواندن فایل محلی: {e}"); return 0
 
-    if csv_path.exists():
-        try:
-            with csv_path.open("r", encoding="utf-8-sig", newline="") as f:
-                rows = list(csv.DictReader(f))
-            if rows and any(_row_value(r, "شناسه") for r in rows):
-                parents, variations = {}, {}
-                for row in rows:
-                    kind = _row_value(row, "نوع").lower()
-                    if not _is_true(_row_value(row, "منتشر شده")):
-                        continue
-                    visibility = _row_value(row, "قابل مشاهده در کاتالوگ").lower()
-                    if visibility in {"hidden", "مخفی"}:
-                        continue
-                    if kind == "variation":
-                        parent_sku = _row_value(row, "مادر")
-                        if parent_sku: variations.setdefault(parent_sku, []).append(row)
-                    elif kind in {"simple", "variable", "grouped", "external"}:
-                        parent_sku = _row_value(row, "شناسه محصول")
-                        parent_key = parent_sku or ("__ID__" + _row_value(row, "شناسه"))
-                        parents[parent_key] = row
+async def refresh_csv_feed():
+    if not PRODUCTS_CSV_URL: return
+    try:
+        timeout=aiohttp.ClientTimeout(total=25)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get(PRODUCTS_CSV_URL) as resp:
+                resp.raise_for_status()
+                raw=await resp.text(encoding=None)
+        count=_merge_csv_products(_parse_woo_csv(raw))
+        print(f"[CSV] فید به‌روزرسانی شد؛ {count} محصول از CSV خوانده شد. کل کاتالوگ: {len(DATA)}")
+    except Exception as e:
+        print(f"[CSV] فید در دسترس نیست؛ کاتالوگ فعلی حفظ شد: {e}")
 
-                catalog = []
-                for parent_key, row in parents.items():
-                    sku = _row_value(row, "شناسه محصول")
-                    pid, name = _row_value(row, "شناسه"), _row_value(row, "نام")
-                    if not pid or not name: continue
-                    oldp = existing.get(pid, {})
-                    variants = []
-                    for vr in variations.get(sku, []) if sku else []:
-                        vstock = _row_value(vr, "انبار")
-                        if not vstock: vstock = "موجود" if _is_true(_row_value(vr, "در انبار؟")) else "نامشخص"
-                        variants.append({
-                            "id": _row_value(vr, "شناسه"), "name": _row_value(vr, "نام") or name,
-                            "price_raw": _price_for(vr), "stock_file": vstock,
-                            "attribute": _row_value(vr, "مقدار(های) 1 صفت", "مقدار 1 صفت")})
-                    image_raw = _row_value(row, "تصاویر")
-                    image = image_raw.split(",")[0].strip() if image_raw else oldp.get("image", "")
-                    if image.startswith("http://"): image = "https://" + image[len("http://"):]
-                    url = _row_value(row, "آدرس خارجی") or oldp.get("product_url", "")
-                    if not url: url = SHOP_URL.rstrip("/") + "/?s=" + quote(name) + "&post_type=product"
-                    description = _row_value(row, "توضیحات", "توضیح کوتاه") or oldp.get("description", "")
-                    if not description: description = "برای اطلاعات دقیق، ترکیبات، روش مصرف و هشدارهای محصول، مشخصات روی بسته‌بندی را بررسی کن. برای قیمت و موجودی روز با فروشگاه هماهنگ کن."
-                    stock = _row_value(row, "انبار")
-                    if not stock: stock = "موجود" if _is_true(_row_value(row, "در انبار؟")) else "نامشخص"
-                    catalog.append({
-                        "id": pid, "sku": sku, "name": name,
-                        "category": _category_from_csv(_row_value(row, "دسته‌ها", "دسته ها"), name) or oldp.get("category", "سایر محصولات"),
-                        "description": description, "image": image, "published": True,
-                        "stock_file": stock, "variants": variants or oldp.get("variants", []),
-                        "product_url": url, "research_note": oldp.get("research_note", "")})
-                if catalog:
-                    print(f"Loaded {len(catalog)} products from {csv_path.name}")
-                    return catalog
-        except Exception as exc:
-            print(f"Could not load {csv_path.name}; falling back to products.json: {exc}")
-
-    if isinstance(old, list):
-        print(f"Loaded {len(old)} products from products.json")
-        return old
-    raise SystemExit("هیچ کاتالوگ محصول معتبری پیدا نشد؛ products.json یا research_queue.csv را بررسی کن.")
-
-DATA=load_product_catalog()
+async def csv_refresh_loop():
+    # اگر فایل CSV روی هاست جایگزین شود، در چرخه بعدی دوباره از دیسک خوانده می‌شود.
+    # فید URL هم در صورت تنظیم بودن، در همان چرخه بررسی می‌شود.
+    while True:
+        await asyncio.sleep(CSV_REFRESH_SECONDS)
+        local_count=load_local_csv()
+        if local_count:
+            print(f"[CSV] فایل محلی دوباره خوانده شد؛ {local_count} محصول/ردیف، کل کاتالوگ: {len(DATA)}")
+        await refresh_csv_feed()
 PAGE_SIZE=8
 bot=Bot(TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp=Dispatcher()
@@ -1285,5 +1307,9 @@ async def main():
     if not isinstance(DATA, list):
         raise SystemExit('products.json باید فهرستی از محصولات باشد.')
     if not TOKEN: raise SystemExit('BOT_TOKEN را در فایل .env وارد کن؛ از BotFather دریافت می‌شود.')
+    local_count=load_local_csv()
+    print(f"[CSV] فایل محلی بررسی شد؛ {local_count} محصول CSV، کل کاتالوگ فعلی: {len(DATA)}")
+    await refresh_csv_feed()
+    asyncio.create_task(csv_refresh_loop())
     await dp.start_polling(bot)
 if __name__=='__main__': asyncio.run(main())
