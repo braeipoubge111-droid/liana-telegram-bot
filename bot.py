@@ -1,4 +1,4 @@
-import asyncio, json, os, re, sqlite3, time
+import asyncio, json, os, re, sqlite3, time, csv
 from pathlib import Path
 from urllib.parse import quote
 from dotenv import load_dotenv
@@ -25,7 +25,115 @@ DB_PATH=Path(__file__).with_name("bot_data.sqlite3")
 AI_USERS=set()                 # users currently chatting with AI
 OWNER_PASSWORD_PENDING=set()   # owner IDs currently entering password
 OWNER_AI_USERS=set()           # owner IDs authenticated for AI testing
-DATA=json.loads(Path(__file__).with_name("products.json").read_text(encoding="utf-8"))
+def _clean(value):
+    return str(value or "").replace("\ufeff", "").strip()
+
+def _norm_header(value):
+    return re.sub(r"[\u200c\u200f\u200e\s]+", "", _clean(value))
+
+def _row_value(row, *names):
+    by_norm = {_norm_header(k): v for k, v in row.items()}
+    for name in names:
+        value = by_norm.get(_norm_header(name))
+        if value is not None and _clean(value):
+            return _clean(value)
+    return ""
+
+def _is_true(value):
+    return _clean(value).lower() in {"1", "yes", "true", "publish", "published", "بله"}
+
+def _category_from_csv(raw, name=""):
+    parts = [x.strip() for x in _clean(raw).split(",") if x.strip()]
+    cat = parts[-1] if parts else ""
+    cat = re.sub(r"^.*\s>\s*", "", cat).strip()
+    if not cat or cat in {"عمده", "آرایشی عمده", "عمده آرایشی", "عمده/آرایشی"}:
+        n = name
+        if any(k in n for k in ("ضدافتاب", "ضد آفتاب")): return "ضدآفتاب"
+        if any(k in n for k in ("شامپو", "ماسک مو", "موبر", "موچین", "برس مو")): return "مراقبت مو"
+        if any(k in n for k in ("عطر", "بادی اسپلش", "مام ", "دئودورانت", "اسپری بدن")): return "عطر و بهداشت بدن"
+        if any(k in n for k in ("رژ لب", "رژلب", "لیپ", "بالم لب", "تینت لب", "خط لب")): return "محصولات لب"
+        if any(k in n for k in ("ریمل", "خط چشم", "مداد چشم", "ابرو", "سایه چشم")): return "چشم و ابرو"
+        if any(k in n for k in ("کرم", "سرم", "تونر", "آبرسان", "مرطوب", "شوینده", "ماسک صورت")): return "مراقبت پوست"
+        if any(k in n for k in ("رژگونه", "کانسیلر", "کوشن", "پنکک", "کرم پودر", "پرایمر", "هایلایتر", "پودر فیکس")): return "آرایش صورت"
+        return "سایر محصولات"
+    return cat
+
+def _price_for(row):
+    return _row_value(row, "قیمت فروش ویژه") or _row_value(row, "قیمت عادی")
+
+def load_product_catalog():
+    """Load latest WooCommerce CSV export when present; otherwise use products.json."""
+    base = Path(__file__).with_name("products.json")
+    csv_path = Path(__file__).with_name("research_queue.csv")
+    existing = {}
+    try:
+        old = json.loads(base.read_text(encoding="utf-8"))
+        if isinstance(old, list): existing = {str(p.get("id")): p for p in old if isinstance(p, dict)}
+    except Exception:
+        old = []
+
+    if csv_path.exists():
+        try:
+            with csv_path.open("r", encoding="utf-8-sig", newline="") as f:
+                rows = list(csv.DictReader(f))
+            if rows and any(_row_value(r, "شناسه") for r in rows):
+                parents, variations = {}, {}
+                for row in rows:
+                    kind = _row_value(row, "نوع").lower()
+                    if not _is_true(_row_value(row, "منتشر شده")):
+                        continue
+                    visibility = _row_value(row, "قابل مشاهده در کاتالوگ").lower()
+                    if visibility in {"hidden", "مخفی"}:
+                        continue
+                    if kind == "variation":
+                        parent_sku = _row_value(row, "مادر")
+                        if parent_sku: variations.setdefault(parent_sku, []).append(row)
+                    elif kind in {"simple", "variable", "grouped", "external"}:
+                        parent_sku = _row_value(row, "شناسه محصول")
+                        parent_key = parent_sku or ("__ID__" + _row_value(row, "شناسه"))
+                        parents[parent_key] = row
+
+                catalog = []
+                for parent_key, row in parents.items():
+                    sku = _row_value(row, "شناسه محصول")
+                    pid, name = _row_value(row, "شناسه"), _row_value(row, "نام")
+                    if not pid or not name: continue
+                    oldp = existing.get(pid, {})
+                    variants = []
+                    for vr in variations.get(sku, []) if sku else []:
+                        vstock = _row_value(vr, "انبار")
+                        if not vstock: vstock = "موجود" if _is_true(_row_value(vr, "در انبار؟")) else "نامشخص"
+                        variants.append({
+                            "id": _row_value(vr, "شناسه"), "name": _row_value(vr, "نام") or name,
+                            "price_raw": _price_for(vr), "stock_file": vstock,
+                            "attribute": _row_value(vr, "مقدار(های) 1 صفت", "مقدار 1 صفت")})
+                    image_raw = _row_value(row, "تصاویر")
+                    image = image_raw.split(",")[0].strip() if image_raw else oldp.get("image", "")
+                    if image.startswith("http://"): image = "https://" + image[len("http://"):]
+                    url = _row_value(row, "آدرس خارجی") or oldp.get("product_url", "")
+                    if not url: url = SHOP_URL.rstrip("/") + "/?s=" + quote(name) + "&post_type=product"
+                    description = _row_value(row, "توضیحات", "توضیح کوتاه") or oldp.get("description", "")
+                    if not description: description = "برای اطلاعات دقیق، ترکیبات، روش مصرف و هشدارهای محصول، مشخصات روی بسته‌بندی را بررسی کن. برای قیمت و موجودی روز با فروشگاه هماهنگ کن."
+                    stock = _row_value(row, "انبار")
+                    if not stock: stock = "موجود" if _is_true(_row_value(row, "در انبار؟")) else "نامشخص"
+                    catalog.append({
+                        "id": pid, "sku": sku, "name": name,
+                        "category": _category_from_csv(_row_value(row, "دسته‌ها", "دسته ها"), name) or oldp.get("category", "سایر محصولات"),
+                        "description": description, "image": image, "published": True,
+                        "stock_file": stock, "variants": variants or oldp.get("variants", []),
+                        "product_url": url, "research_note": oldp.get("research_note", "")})
+                if catalog:
+                    print(f"Loaded {len(catalog)} products from {csv_path.name}")
+                    return catalog
+        except Exception as exc:
+            print(f"Could not load {csv_path.name}; falling back to products.json: {exc}")
+
+    if isinstance(old, list):
+        print(f"Loaded {len(old)} products from products.json")
+        return old
+    raise SystemExit("هیچ کاتالوگ محصول معتبری پیدا نشد؛ products.json یا research_queue.csv را بررسی کن.")
+
+DATA=load_product_catalog()
 PAGE_SIZE=8
 bot=Bot(TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp=Dispatcher()
@@ -94,7 +202,19 @@ def product_text(p):
     category=str(p.get('category') or 'سایر محصولات').strip()
     lines=[f"<b>✨ {esc(name)}</b>", f"<b>🗂 دسته‌بندی:</b> {esc(category)}"]
 
-    bio=product_description(p)
+    stored=str(p.get('description') or '').strip()
+    normalized=normalize_fa(stored)
+    generic_copy=(
+        'این محصول برای روتین مراقبت یا بهداشت شخصی عرضه شده',
+        'این محصول از دسته',
+        'این کالا در دسته',
+        'برای تکمیل آرایش چشم استفاده می شود',
+        'این محصول برای آرایش لب است',
+    )
+    if not stored or any(normalize_fa(x) in normalized for x in generic_copy):
+        bio=describe_product(p)
+    else:
+        bio=stored
     if bio:
         lines.extend(['', '<b>🌷 درباره محصول</b>', esc(bio)])
 
@@ -211,18 +331,6 @@ def ai_kb():
         [btn("↩️ خروج از هوش مصنوعی", "ai:exit"), btn("🏠 خانه", "home")]
     ])
 
-def product_description(p):
-    """Prefer useful stored copy; replace known placeholder descriptions with product-aware copy."""
-    stored=str(p.get('description') or '').strip()
-    normalized=normalize_fa(stored)
-    placeholders=(
-        'این محصول برای روتین مراقبت یا بهداشت شخصی عرضه شده',
-        'این محصول از دسته', 'این کالا در دسته', 'این محصول برای آرایش لب است',
-    )
-    if not stored or any(normalize_fa(x) in normalized for x in placeholders):
-        return describe_product(p)
-    return stored
-
 def product_context(query:str, limit=8):
     """Provide AI with best-ranked catalogue matches, their descriptions and variants."""
     matches=intent_products(query, limit)
@@ -233,7 +341,7 @@ def product_context(query:str, limit=8):
         variants=[]
         for v in p.get('variants',[])[:8]:
             variants.append({'variant':str(v.get('attribute') or v.get('name') or ''),'price_raw':str(v.get('price_raw') or ''),'stock_file':str(v.get('stock_file') or p.get('stock_file') or 'نامشخص')})
-        out.append({'name':p.get('name',''),'category':p.get('category',''),'description':product_description(p),'variants':variants,'product_url':p.get('product_url','')})
+        out.append({'name':p.get('name',''),'category':p.get('category',''),'description':p.get('description') or describe_product(p),'variants':variants,'product_url':p.get('product_url','')})
     return out
 
 # --- دامنه گفت‌وگو و پایگاه دانش آرایشی آفلاین ---
@@ -314,7 +422,7 @@ def is_beauty_question(q:str)->bool:
     # Store/customer-service questions are valid in the Liyana assistant.
     service_terms=('فروشگاه','لیانا','آدرس','شماره تماس','تماس','تلفن','شعبه','گناوه','پارکینگ ملت','جام جم',
                    'ساعت کاری','باز هستید','بازین','بازید','تعطیل','ارسال','پست','سفارش','خرید حضوری','خرید اینترنتی',
-                   'پرداخت','مرجوع','تعویض','سایت','کانال','تلگرام','قیمت','موجودی')
+                   'پرداخت','مرجوع','تعویض','سایت','کانال','تلگرام','قیمت','موجودی','دارید','دارین','میخوام','می خواهم','میخوام بخرم')
     if any(normalize_fa(x) in qn for x in service_terms): return True
     # Strong topical terms; include everyday phrasing and common cosmetic names.
     strong=[x for x in DOMAIN_TERMS if len(normalize_fa(x))>=3 and normalize_fa(x) in qn]
@@ -373,22 +481,6 @@ def describe_product(p):
         base='محصول مرطوب‌کننده/آبرسان برای کمک به حفظ رطوبت و کاهش احساس خشکی در روتین پوستی است. روی پوست تمیز و طبق دستور سازنده استفاده کن. برای پوست چرب، بافت سبک و برای پوست خشک، بافت غنی‌تر ممکن است راحت‌تر باشد؛ سازگاری دقیق این مدل را از ترکیبات و توضیحاتش بررسی کن.'
     elif 'ماسک' in n:
         base='محصول ماسک برای استفاده تکمیلی در روتین مراقبت یا زیبایی است. نوع ماسک، محل استفاده، مدت ماندن روی پوست و نیاز به آبکشی را از دستور همین محصول پیروی کن؛ استفاده بیشتر از زمان توصیه‌شده لزوماً نتیجه بهتری نمی‌دهد.'
-    elif 'سفید کننده زانو' in n or 'سفیدکننده زانو' in n or ('زانو' in n and 'آرنج' in n and 'کرم' in n):
-        base='این کرم طبق نام محصول برای مراقبت از پوست ناحیه زانو و آرنج عرضه شده است. روشن‌کنندگی یا نتیجه درمانی را فقط از روی نام نمی‌توان تضمین کرد؛ ترکیبات، هشدارها و روش مصرف روی بسته‌بندی را بررسی کن. روی پوست تحریک‌شده استفاده نکن و ابتدا مقدار کمی را روی بخش کوچکی امتحان کن.'
-    elif 'اسکراب' in n:
-        base='اسکراب برای پاک‌سازی سطحی و کمک به برداشتن سلول‌های مرده استفاده می‌شود؛ فشار زیاد یا استفاده مکرر ممکن است پوست را تحریک کند. طبق دستور سازنده و با ملایمت استفاده کن و روی پوست زخمی، ملتهب یا تازه اصلاح‌شده نزن. برای پوست حساس، قبل از مصرف احتیاط کن.'
-    elif 'مسواک' in n:
-        base='این کالا یک ابزار بهداشت دهان است. با فشار ملایم و طبق توصیه دندان‌پزشک استفاده کن و مسواک را پس از مصرف آبکشی و در حالت خشک نگه دار؛ مسواک را با دیگران مشترک استفاده نکن. نرمی برس و جزئیات جنس را از مشخصات همین مدل بررسی کن.'
-    elif 'تیغ' in n or 'ژیلت' in n or 'خودتراش' in n:
-        base='این محصول برای اصلاح موهای بدن یا صورت، بسته به نوع و دستور سازنده، عرضه شده است. روی پوست تمیز و مرطوب و بدون فشار زیاد استفاده کن، تیغ را با دیگران مشترک نگذار و در صورت کندشدن یا آسیب‌دیدگی تعویضش کن. محل مصرف و تعداد تیغه‌ها را از بسته‌بندی تأیید کن.'
-    elif 'دستمال' in n:
-        base='این محصول دستمالی برای استفاده روزمره است؛ کاربرد دقیق آن (پاک‌کردن آرایش، تمیزکاری یا مصرف بهداشتی) را از بسته‌بندی و تصویر کالا بررسی کن. برای صورت و به‌ویژه اطراف چشم فقط زمانی استفاده کن که سازنده صریحاً آن را مناسب این ناحیه معرفی کرده باشد.'
-    elif 'کرم مو' in n or 'ماسک مو' in n or 'شامپو' in n or 'نرم کننده مو' in n:
-        base='این محصول برای مراقبت از مو عرضه شده است. محل مصرف (پوست سر یا ساقه مو)، مقدار و مدت مکث را طبق دستور سازنده رعایت کن؛ همه محصولات مو روش مصرف یکسانی ندارند. اگر خارش یا تحریک ایجاد شد، مصرف را متوقف کن و ترکیبات را بررسی کن.'
-    elif 'سرم صورت' in n or 'سرم رنگی' in n:
-        base='این سرم طبق نام محصول برای استفاده در روتین مراقبت یا آرایش عرضه شده است. کارکرد دقیق، ترکیبات فعال و مناسب‌بودن برای نوع پوست را از برچسب سازنده بررسی کن؛ نام یا ظاهر محصول به‌تنهایی اثر درمانی یا روشن‌کنندگی را ثابت نمی‌کند. محصول جدید را ابتدا روی بخش کوچکی امتحان کن.'
-    elif 'کرم شیرالاغ' in n:
-        base='این کرم با نام «شیرالاغ» معرفی شده، اما از نام محصول نمی‌توان ترکیبات واقعی یا اثر قطعی را تأیید کرد. فهرست ترکیبات و روش مصرف روی بسته‌بندی را بررسی کن و برای پوست حساس ابتدا تست موضعی انجام بده.'
     elif any(x in n for x in ('ناخن گیر','ناخن‌گیر')):
         base='ناخن‌گیر برای کوتاه‌کردن ناخن‌هاست؛ با فشار کنترل‌شده و روی ناخن خشک استفاده کن و ابزار را پس از استفاده تمیز نگه دار. برای کودک، فقط با نظارت بزرگسال استفاده شود.'
     elif 'ناخن' in n or 'لاک ناخن' in n or n.startswith('لاک ') or 'لاک ' in n:
@@ -969,10 +1061,6 @@ async def call_groq(user_text:str, history=None):
     history=history or []
     interpreted_text=contextual_query(user_text,history)
     q=normalize_fa(interpreted_text)
-    # Keep the assistant on its intended topic even if an optional external model is configured.
-    allowed_affection=('دوستت دارم','عاشقتم','عزیزمی','عشقم')
-    if not is_beauty_question(interpreted_text) and not any(x in q for x in allowed_affection):
-        return '🌷 متأسفم عزیزم، نمی‌تونم به چنین سؤالی جواب بدم. اگه درباره آرایش، مراقبت پوست و مو یا محصولات لیانا سؤالی داری، با کمال میل کمکت می‌کنم 💗'
     # Price/stock/existence questions must be grounded in the store's current catalog data.
     if any(x in q for x in ('قیمت','چنده','چقدر','موجود','دارید','دارین','وجود داره','هست یا نه','پیدا میشه')):
         local=product_status_answer(interpreted_text)
@@ -1017,7 +1105,7 @@ async def call_groq(user_text:str, history=None):
 async def cb_ai_open(c:CallbackQuery):
     uid=c.from_user.id
     AI_USERS.add(uid); OWNER_PASSWORD_PENDING.discard(uid); history_clear(uid)
-    await c.message.answer('🤖 <b>دستیار زیبایی لیانا</b>\n\nسلام خوشگلم! 🌷 هر سؤالی درباره آرایش، مراقبت پوست و مو یا محصولات لیانا داری بپرس. با هم گزینه‌های مناسب رو بررسی می‌کنیم؛ اگر اطلاعات دقیق رنگ، ترکیبات یا ویژگی یک محصول مشخص نباشه، چیزی رو از خودم حدس نمی‌زنم. 💄✨\n\nخب عزیزم، بگو ببینم چطور کمکت کنم؟',reply_markup=ai_kb())
+    await c.message.answer('🤖 <b>دستیار محصولات لیانا شاپ</b>\n\nبه پرسش‌های رایج آرایش و مراقبت پوست و مو پاسخ می‌دهم، سؤال‌های محاوره‌ای را می‌فهمم و در محصولات لیانا جست‌وجو می‌کنم؛ اگر اطلاعات دقیق رنگ یا ترکیبات محصول مشخص نباشد، حدس نمی‌زنم و راه بررسی را پیشنهاد می‌دهم.\n\nمی‌توانی درباره مراقبت پوست، اصول آرایش، ایمنی محصولات، نام محصول، قیمت یا موجودی محصولات بپرسی؛ سؤال‌های نامرتبط پاسخ داده نمی‌شوند.\n\nپیامت را بفرست؛ برای خروج دکمه زیر را بزن.',reply_markup=ai_kb())
     await c.answer()
 
 @dp.callback_query(F.data=='ai:continue')
@@ -1051,7 +1139,7 @@ async def text_search(m:Message):
         OWNER_PASSWORD_PENDING.discard(uid)
         if is_owner_id(uid) and OWNER_PASSWORD and q==OWNER_PASSWORD:
             OWNER_AI_USERS.add(uid); AI_USERS.add(uid)
-            await m.answer('✅ حالت آزمایشی صاحب ربات فعال شد. خوش اومدی! 🌷',reply_markup=ai_kb())
+            await m.answer('✅ حالت آزمایشی صاحب ربات فعال شد. پاسخ‌گویی محلی فعال است و به API نیاز ندارد.',reply_markup=ai_kb())
         else:
             OWNER_AI_USERS.discard(uid)
             await m.answer('❌ رمز یا دسترسی صاحب ربات معتبر نیست.',reply_markup=home_kb())
