@@ -1,4 +1,4 @@
-import asyncio, csv, io, json, os, re, sqlite3, time
+import asyncio, csv, io, json, os, re, sqlite3, time, hashlib
 from pathlib import Path
 from urllib.parse import quote
 from dotenv import load_dotenv
@@ -157,6 +157,7 @@ async def csv_refresh_loop():
             print(f"[CSV] فایل محلی دوباره خوانده شد؛ {local_count} محصول/ردیف، کل کاتالوگ: {len(DATA)}")
         await refresh_csv_feed()
 PAGE_SIZE=8
+SEARCH_PAGE_QUERIES={}  # شناسه کوتاه برای نگهداری عبارت جست‌وجو بین صفحات
 bot=Bot(TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp=Dispatcher()
 
@@ -583,7 +584,7 @@ def search_products(query, limit=8):
     exact_matches = [item for item in DATA
                      if item.get('published', True) and search_norm(item.get('name', '')) == q]
     if exact_matches:
-        return exact_matches[:max(1, min(int(limit), 20))]
+        return exact_matches[:max(1, min(int(limit), 200))]
     expanded = list(q_tokens)
     for key, vals in aliases.items():
         if search_norm(key) in q or any(search_norm(v) in q for v in vals):
@@ -644,7 +645,7 @@ def search_products(query, limit=8):
     # Stable tie-break: exact/product-name matches first, then alphabetical.
     scored.sort(key=lambda x: (-x[0], x[1]))
     results = [item for _, _, item in scored]
-    return results[:max(1, min(int(limit), 20))]
+    return results[:max(1, min(int(limit), 200))]
 
 
 
@@ -1181,16 +1182,15 @@ async def text_search(m:Message):
     if q.startswith('/') or len(q)<2: return
     # Outside AI mode, keep behavior deterministic: search the real product catalog only.
     # AI is activated exclusively by the explicit "گفت‌وگو با هوش مصنوعی" button.
-    matches = search_products(q, limit=8)
+    matches = search_products(q, limit=200)
     if matches:
-        rows = []
-        for p in matches:
-            rows.append([btn("🧴 " + p.get("name", "محصول")[:55], f"product:{p['id']}")])
-        rows.append(nav_row())
+        # شناسه کوتاه در callback_data استفاده می‌شود تا عبارت فارسی باعث عبور از محدودیت تلگرام نشود.
+        search_key = hashlib.md5(q.encode("utf-8")).hexdigest()[:8]
+        SEARCH_PAGE_QUERIES[search_key] = q
         await m.answer(
-            "🔎 <b>نتایج جست‌وجو در محصولات لیانا</b>\n"
-            "محصول موردنظرت رو از فهرست انتخاب کن تا جزئیات، تنوع‌ها و راه استعلام قیمت رو ببینی 🌷",
-            reply_markup=InlineKeyboardMarkup(inline_keyboard=rows)
+            f"🔎 <b>نتایج جست‌وجو در محصولات لیانا</b>\n{len(matches)} محصول پیدا شد.\n"
+            "برای دیدن محصولات بیشتر از دکمه «بعدی» استفاده کن. محصول رو انتخاب کن تا جزئیات و راه استعلام قیمت رو ببینی 🌷",
+            reply_markup=paginated(matches, 0, 'searchpage:' + search_key)
         )
         return
     await m.answer(
@@ -1233,9 +1233,17 @@ async def cb_catpage(c:CallbackQuery):
     await c.message.edit_text(f"<b>✨ {esc(cat)}</b>\n{len(items)} محصول در این دسته",reply_markup=paginated(items,page,'catpage:'+code)); await c.answer()
 @dp.callback_query(F.data.startswith('searchpage:'))
 async def cb_searchpage(c:CallbackQuery):
-    _,page,query=c.data.split(':',2); page=int(page); query=__import__('urllib.parse').parse.unquote(query)
-    items=search_products(query, limit=40)
-    await c.message.edit_text(f"🔎 نتایج جست‌وجو برای «{esc(query)}»",reply_markup=paginated(items,page,'searchpage:'+quote(query,safe=''))); await c.answer()
+    _,page,search_key=c.data.split(':',2); page=int(page)
+    query=SEARCH_PAGE_QUERIES.get(search_key)
+    if query is None:
+        query=__import__('urllib.parse').parse.unquote(search_key)
+    items=search_products(query, limit=200)
+    if not items:
+        await c.answer('نتایج این جست‌وجو دیگر در دسترس نیست؛ دوباره جست‌وجو کن.', show_alert=True); return
+    await c.message.edit_text(
+        f"🔎 نتایج جست‌وجو برای «{esc(query)}»\nصفحه {page+1} از {(len(items)+PAGE_SIZE-1)//PAGE_SIZE} — {len(items)} محصول",
+        reply_markup=paginated(items,page,'searchpage:'+search_key)
+    ); await c.answer()
 @dp.callback_query(F.data.startswith('qpage:'))
 async def cb_qpage(c:CallbackQuery):
     _,page,key=c.data.split(':',2); page=int(page); items=matching_question(key)
