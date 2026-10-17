@@ -94,19 +94,7 @@ def product_text(p):
     category=str(p.get('category') or 'سایر محصولات').strip()
     lines=[f"<b>✨ {esc(name)}</b>", f"<b>🗂 دسته‌بندی:</b> {esc(category)}"]
 
-    stored=str(p.get('description') or '').strip()
-    normalized=normalize_fa(stored)
-    generic_copy=(
-        'این محصول برای روتین مراقبت یا بهداشت شخصی عرضه شده',
-        'این محصول از دسته',
-        'این کالا در دسته',
-        'برای تکمیل آرایش چشم استفاده می شود',
-        'این محصول برای آرایش لب است',
-    )
-    if not stored or any(normalize_fa(x) in normalized for x in generic_copy):
-        bio=describe_product(p)
-    else:
-        bio=stored
+    bio=product_description(p)
     if bio:
         lines.extend(['', '<b>🌷 درباره محصول</b>', esc(bio)])
 
@@ -223,6 +211,18 @@ def ai_kb():
         [btn("↩️ خروج از هوش مصنوعی", "ai:exit"), btn("🏠 خانه", "home")]
     ])
 
+def product_description(p):
+    """Prefer useful stored copy; replace known placeholder descriptions with product-aware copy."""
+    stored=str(p.get('description') or '').strip()
+    normalized=normalize_fa(stored)
+    placeholders=(
+        'این محصول برای روتین مراقبت یا بهداشت شخصی عرضه شده',
+        'این محصول از دسته', 'این کالا در دسته', 'این محصول برای آرایش لب است',
+    )
+    if not stored or any(normalize_fa(x) in normalized for x in placeholders):
+        return describe_product(p)
+    return stored
+
 def product_context(query:str, limit=8):
     """Provide AI with best-ranked catalogue matches, their descriptions and variants."""
     matches=intent_products(query, limit)
@@ -233,7 +233,7 @@ def product_context(query:str, limit=8):
         variants=[]
         for v in p.get('variants',[])[:8]:
             variants.append({'variant':str(v.get('attribute') or v.get('name') or ''),'price_raw':str(v.get('price_raw') or ''),'stock_file':str(v.get('stock_file') or p.get('stock_file') or 'نامشخص')})
-        out.append({'name':p.get('name',''),'category':p.get('category',''),'description':p.get('description') or describe_product(p),'variants':variants,'product_url':p.get('product_url','')})
+        out.append({'name':p.get('name',''),'category':p.get('category',''),'description':product_description(p),'variants':variants,'product_url':p.get('product_url','')})
     return out
 
 # --- دامنه گفت‌وگو و پایگاه دانش آرایشی آفلاین ---
@@ -314,7 +314,7 @@ def is_beauty_question(q:str)->bool:
     # Store/customer-service questions are valid in the Liyana assistant.
     service_terms=('فروشگاه','لیانا','آدرس','شماره تماس','تماس','تلفن','شعبه','گناوه','پارکینگ ملت','جام جم',
                    'ساعت کاری','باز هستید','بازین','بازید','تعطیل','ارسال','پست','سفارش','خرید حضوری','خرید اینترنتی',
-                   'پرداخت','مرجوع','تعویض','سایت','کانال','تلگرام','قیمت','موجودی','دارید','دارین','میخوام','می خواهم','میخوام بخرم')
+                   'پرداخت','مرجوع','تعویض','سایت','کانال','تلگرام','قیمت','موجودی')
     if any(normalize_fa(x) in qn for x in service_terms): return True
     # Strong topical terms; include everyday phrasing and common cosmetic names.
     strong=[x for x in DOMAIN_TERMS if len(normalize_fa(x))>=3 and normalize_fa(x) in qn]
@@ -373,6 +373,22 @@ def describe_product(p):
         base='محصول مرطوب‌کننده/آبرسان برای کمک به حفظ رطوبت و کاهش احساس خشکی در روتین پوستی است. روی پوست تمیز و طبق دستور سازنده استفاده کن. برای پوست چرب، بافت سبک و برای پوست خشک، بافت غنی‌تر ممکن است راحت‌تر باشد؛ سازگاری دقیق این مدل را از ترکیبات و توضیحاتش بررسی کن.'
     elif 'ماسک' in n:
         base='محصول ماسک برای استفاده تکمیلی در روتین مراقبت یا زیبایی است. نوع ماسک، محل استفاده، مدت ماندن روی پوست و نیاز به آبکشی را از دستور همین محصول پیروی کن؛ استفاده بیشتر از زمان توصیه‌شده لزوماً نتیجه بهتری نمی‌دهد.'
+    elif 'سفید کننده زانو' in n or 'سفیدکننده زانو' in n or ('زانو' in n and 'آرنج' in n and 'کرم' in n):
+        base='این کرم طبق نام محصول برای مراقبت از پوست ناحیه زانو و آرنج عرضه شده است. روشن‌کنندگی یا نتیجه درمانی را فقط از روی نام نمی‌توان تضمین کرد؛ ترکیبات، هشدارها و روش مصرف روی بسته‌بندی را بررسی کن. روی پوست تحریک‌شده استفاده نکن و ابتدا مقدار کمی را روی بخش کوچکی امتحان کن.'
+    elif 'اسکراب' in n:
+        base='اسکراب برای پاک‌سازی سطحی و کمک به برداشتن سلول‌های مرده استفاده می‌شود؛ فشار زیاد یا استفاده مکرر ممکن است پوست را تحریک کند. طبق دستور سازنده و با ملایمت استفاده کن و روی پوست زخمی، ملتهب یا تازه اصلاح‌شده نزن. برای پوست حساس، قبل از مصرف احتیاط کن.'
+    elif 'مسواک' in n:
+        base='این کالا یک ابزار بهداشت دهان است. با فشار ملایم و طبق توصیه دندان‌پزشک استفاده کن و مسواک را پس از مصرف آبکشی و در حالت خشک نگه دار؛ مسواک را با دیگران مشترک استفاده نکن. نرمی برس و جزئیات جنس را از مشخصات همین مدل بررسی کن.'
+    elif 'تیغ' in n or 'ژیلت' in n or 'خودتراش' in n:
+        base='این محصول برای اصلاح موهای بدن یا صورت، بسته به نوع و دستور سازنده، عرضه شده است. روی پوست تمیز و مرطوب و بدون فشار زیاد استفاده کن، تیغ را با دیگران مشترک نگذار و در صورت کندشدن یا آسیب‌دیدگی تعویضش کن. محل مصرف و تعداد تیغه‌ها را از بسته‌بندی تأیید کن.'
+    elif 'دستمال' in n:
+        base='این محصول دستمالی برای استفاده روزمره است؛ کاربرد دقیق آن (پاک‌کردن آرایش، تمیزکاری یا مصرف بهداشتی) را از بسته‌بندی و تصویر کالا بررسی کن. برای صورت و به‌ویژه اطراف چشم فقط زمانی استفاده کن که سازنده صریحاً آن را مناسب این ناحیه معرفی کرده باشد.'
+    elif 'کرم مو' in n or 'ماسک مو' in n or 'شامپو' in n or 'نرم کننده مو' in n:
+        base='این محصول برای مراقبت از مو عرضه شده است. محل مصرف (پوست سر یا ساقه مو)، مقدار و مدت مکث را طبق دستور سازنده رعایت کن؛ همه محصولات مو روش مصرف یکسانی ندارند. اگر خارش یا تحریک ایجاد شد، مصرف را متوقف کن و ترکیبات را بررسی کن.'
+    elif 'سرم صورت' in n or 'سرم رنگی' in n:
+        base='این سرم طبق نام محصول برای استفاده در روتین مراقبت یا آرایش عرضه شده است. کارکرد دقیق، ترکیبات فعال و مناسب‌بودن برای نوع پوست را از برچسب سازنده بررسی کن؛ نام یا ظاهر محصول به‌تنهایی اثر درمانی یا روشن‌کنندگی را ثابت نمی‌کند. محصول جدید را ابتدا روی بخش کوچکی امتحان کن.'
+    elif 'کرم شیرالاغ' in n:
+        base='این کرم با نام «شیرالاغ» معرفی شده، اما از نام محصول نمی‌توان ترکیبات واقعی یا اثر قطعی را تأیید کرد. فهرست ترکیبات و روش مصرف روی بسته‌بندی را بررسی کن و برای پوست حساس ابتدا تست موضعی انجام بده.'
     elif any(x in n for x in ('ناخن گیر','ناخن‌گیر')):
         base='ناخن‌گیر برای کوتاه‌کردن ناخن‌هاست؛ با فشار کنترل‌شده و روی ناخن خشک استفاده کن و ابزار را پس از استفاده تمیز نگه دار. برای کودک، فقط با نظارت بزرگسال استفاده شود.'
     elif 'ناخن' in n or 'لاک ناخن' in n or n.startswith('لاک ') or 'لاک ' in n:
@@ -953,6 +969,10 @@ async def call_groq(user_text:str, history=None):
     history=history or []
     interpreted_text=contextual_query(user_text,history)
     q=normalize_fa(interpreted_text)
+    # Keep the assistant on its intended topic even if an optional external model is configured.
+    allowed_affection=('دوستت دارم','عاشقتم','عزیزمی','عشقم')
+    if not is_beauty_question(interpreted_text) and not any(x in q for x in allowed_affection):
+        return '🌷 متأسفم عزیزم، نمی‌تونم به چنین سؤالی جواب بدم. اگه درباره آرایش، مراقبت پوست و مو یا محصولات لیانا سؤالی داری، با کمال میل کمکت می‌کنم 💗'
     # Price/stock/existence questions must be grounded in the store's current catalog data.
     if any(x in q for x in ('قیمت','چنده','چقدر','موجود','دارید','دارین','وجود داره','هست یا نه','پیدا میشه')):
         local=product_status_answer(interpreted_text)
@@ -997,7 +1017,7 @@ async def call_groq(user_text:str, history=None):
 async def cb_ai_open(c:CallbackQuery):
     uid=c.from_user.id
     AI_USERS.add(uid); OWNER_PASSWORD_PENDING.discard(uid); history_clear(uid)
-    await c.message.answer('🤖 <b>دستیار محصولات لیانا شاپ</b>\n\nبه پرسش‌های رایج آرایش و مراقبت پوست و مو پاسخ می‌دهم، سؤال‌های محاوره‌ای را می‌فهمم و در محصولات لیانا جست‌وجو می‌کنم؛ اگر اطلاعات دقیق رنگ یا ترکیبات محصول مشخص نباشد، حدس نمی‌زنم و راه بررسی را پیشنهاد می‌دهم.\n\nمی‌توانی درباره مراقبت پوست، اصول آرایش، ایمنی محصولات، نام محصول، قیمت یا موجودی محصولات بپرسی؛ سؤال‌های نامرتبط پاسخ داده نمی‌شوند.\n\nپیامت را بفرست؛ برای خروج دکمه زیر را بزن.',reply_markup=ai_kb())
+    await c.message.answer('🤖 <b>دستیار زیبایی لیانا</b>\n\nسلام خوشگلم! 🌷 هر سؤالی درباره آرایش، مراقبت پوست و مو یا محصولات لیانا داری بپرس. با هم گزینه‌های مناسب رو بررسی می‌کنیم؛ اگر اطلاعات دقیق رنگ، ترکیبات یا ویژگی یک محصول مشخص نباشه، چیزی رو از خودم حدس نمی‌زنم. 💄✨\n\nخب عزیزم، بگو ببینم چطور کمکت کنم؟',reply_markup=ai_kb())
     await c.answer()
 
 @dp.callback_query(F.data=='ai:continue')
@@ -1031,7 +1051,7 @@ async def text_search(m:Message):
         OWNER_PASSWORD_PENDING.discard(uid)
         if is_owner_id(uid) and OWNER_PASSWORD and q==OWNER_PASSWORD:
             OWNER_AI_USERS.add(uid); AI_USERS.add(uid)
-            await m.answer('✅ حالت آزمایشی صاحب ربات فعال شد. پاسخ‌گویی محلی فعال است و به API نیاز ندارد.',reply_markup=ai_kb())
+            await m.answer('✅ حالت آزمایشی صاحب ربات فعال شد. خوش اومدی! 🌷',reply_markup=ai_kb())
         else:
             OWNER_AI_USERS.discard(uid)
             await m.answer('❌ رمز یا دسترسی صاحب ربات معتبر نیست.',reply_markup=home_kb())
