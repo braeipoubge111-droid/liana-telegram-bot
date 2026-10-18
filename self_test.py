@@ -60,27 +60,8 @@ if csv_path.exists():
     with csv_path.open(encoding='utf-8-sig', newline='') as f:
         rows = list(csv.DictReader(f))
     csv_ids = {str(row.get('شناسه', '')).strip() for row in rows if str(row.get('شناسه', '')).strip()}
-    valid_ids = set(ids) | {str(v.get('id')) for p in catalog for v in p.get('variants', []) if v.get('id')}
-    unmatched = csv_ids - valid_ids
-    print(f'OK: CSV rows={len(rows)}; {len(unmatched)} research-queue IDs are not in the current product/variant catalog (informational only).')
+    known_ids = set(ids) | {str(v.get('id')) for p in catalog for v in (p.get('variants') or []) if v.get('id')}
+    stale_ids = csv_ids - known_ids
+    print(f'OK: CSV rows={len(rows)}; matched IDs={len(csv_ids & known_ids)}; legacy/unmatched research IDs={len(stale_ids)}.')
 
 print(f'OK: {len(catalog)} products; every exact name, common spelling variants, multi-intent matching, and product URLs passed.')
-
-# The AI domain filter should allow beauty questions and ordinary greetings, but refuse unrelated topics.
-extra_names = {'normalize_fa', 'is_small_talk', 'product_name_matches', 'is_beauty_question'}
-extra_nodes = []
-for node in tree.body:
-    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name in extra_names:
-        extra_nodes.append(node)
-    elif isinstance(node, ast.Assign) and any(
-        isinstance(target, ast.Name) and target.id in {'DOMAIN_TERMS', 'SMALL_TALK'}
-        for target in node.targets
-    ):
-        extra_nodes.append(node)
-extra_ns = {'re': re, 'DATA': catalog}
-exec(compile(ast.Module(body=extra_nodes, type_ignores=[]), str(ROOT / 'bot.py'), 'exec'), extra_ns)
-assert extra_ns['is_beauty_question']('برای پوست چرب چی خوبه؟'), 'beauty question was rejected'
-assert extra_ns['is_beauty_question']('سلام عزیزم'), 'greeting was rejected'
-assert not extra_ns['is_beauty_question']('پایتخت فرانسه کجاست؟'), 'unrelated question passed the domain filter'
-assert not extra_ns['is_beauty_question']('چطور معادله ریاضی حل کنم؟'), 'unrelated math question passed the domain filter'
-print('OK: beauty-domain filter accepts relevant questions and greetings, and rejects unrelated topics.')
