@@ -337,11 +337,113 @@ def ai_kb():
         [btn("↩️ خروج از هوش مصنوعی", "ai:exit"), btn("🏠 خانه", "home")]
     ])
 
+
+def fuzzy_catalog_products(query:str, limit=8):
+    """Find catalog products from short keywords or long colloquial messages, tolerating typos."""
+    from difflib import SequenceMatcher
+    q=normalize_fa(query)
+    if not q:
+        return []
+    # Common casual phrases and request words should not dominate product matching.
+    stop={
+        'شما','ما','من','منو','برای','واسه','یه','یک','این','اون','آن','رو','را','به','از','با','و','یا',
+        'دارید','دارین','دارین؟','موجود','موجوده','هست','هستش','هستید','میخواهم','میخوام','می','خوام',
+        'می شود','میشه','میشه؟','پیدا','کن','کنید','میشه','لطفا','لطفاً','خواهشا','خواهشاً','سلام',
+        'محصول','محصولات','کالا','چیز','چیزی','جنس','جنسش','مدل','مدلش','پیشنهاد','معرفی','بده','بدید',
+        'بگید','بگو','کدوم','کدام','چه','چی','چیه','چطوره','خوبه','خوب','مناسب','دارم','میخوام','می خواهم',
+        'قیمت','چنده','چقدر','توی','داخل','فروشگاه','لیانا','شاپ','برام','برامون','هم','همین','اونایی',
+        'میشه','می‌خوام','میکنی','میکنید','می‌کنید','بخرم','بگیرم','خرید','کردن','کردید','دنبال','هستم'
+    }
+    # Normalize joined/spoken variants.
+    replacements={
+        'رژلب':'رژ لب','کرمپودر':'کرم پودر','ضدافتاب':'ضد آفتاب','ضدآفتاب':'ضد آفتاب',
+        'لیپگلاس':'لیپ گلاس','بادیاسپلش':'بادی اسپلش','فیسواش':'فیس واش','خطچشم':'خط چشم',
+        'رژگونه':'رژ گونه','مدادابرو':'مداد ابرو','اسپری بدن':'بادی اسپلش'
+    }
+    for old,new in replacements.items():
+        q=q.replace(old,new)
+    q_tokens=[t for t in q.split() if len(t)>1 and t not in stop and not t.isdigit()]
+    if not q_tokens:
+        return []
+    # Synonyms cover everyday descriptions rather than only official product terms.
+    synonyms={
+        'لب':['رژ لب','تینت','لیپ گلاس','برق لب','بالم لب','خط لب'],
+        'رنگ لب':['رژ لب','تینت','لیپ گلاس'],
+        'براق':['لیپ گلاس','برق لب'],
+        'خوشبو':['عطر','ادکلن','بادی اسپلش'],
+        'بو':['عطر','ادکلن','بادی اسپلش'],
+        'بدن':['بادی اسپلش','لوسیون','نمک بدن'],
+        'لک':['کانسیلر','کرم پودر','سرم'],
+        'تیرگی':['کانسیلر'],
+        'زیر چشم':['کانسیلر'],
+        'چشم':['ریمل','خط چشم','سایه چشم','مداد چشم'],
+        'مژه':['ریمل','مژه مصنوعی','فرمژه'],
+        'ابرو':['مداد ابرو','ژل ابرو','صابون ابرو'],
+        'پوست':['آبرسان','مرطوب کننده','شوینده','ضد آفتاب','کرم پودر'],
+        'خشکی':['آبرسان','مرطوب کننده','کرم دست'],
+        'جوش':['ضد جوش','شوینده','سرم'],
+        'ناخن':['لاک','ناخن مصنوعی','ناخن گیر'],
+        'مو':['شامپو','ماسک مو','سرم مو']
+    }
+    expanded=list(q_tokens)
+    for token in q_tokens:
+        for key, vals in synonyms.items():
+            if token==key or (len(token)>=3 and (token in key or key in token)):
+                expanded.extend(normalize_fa(v) for v in vals)
+    query_terms=list(dict.fromkeys(expanded))
+    scored=[]
+    for item in DATA:
+        if not item.get('published',True):
+            continue
+        name=normalize_fa(item.get('name',''))
+        category=normalize_fa(item.get('category',''))
+        attrs=' '.join(normalize_fa(v.get('attribute') or v.get('name') or '') for v in item.get('variants',[]))
+        desc=normalize_fa(item.get('description',''))
+        hay=f'{name} {category} {attrs} {desc}'
+        name_tokens=name.split()
+        score=0; matched=0
+        for token in q_tokens:
+            if token in name:
+                score+=8 if token in name_tokens else 6; matched+=1
+            elif token in category:
+                score+=4; matched+=1
+            elif token in attrs:
+                score+=3; matched+=1
+            elif token in desc:
+                score+=1; matched+=1
+            else:
+                # Typo-tolerant token match against product name and category terms.
+                candidates=[x for x in (name_tokens+category.split()) if len(x)>=3 and len(token)>=3]
+                best=max((SequenceMatcher(None,token,x).ratio() for x in candidates),default=0)
+                if best>=0.76:
+                    score+=4; matched+=1
+        # Exact brand/product keyword in a long message should be enough to surface it.
+        if matched:
+            score += int(8*matched/max(1,len(q_tokens)))
+            if len(q_tokens)>1 and matched/len(q_tokens)>=0.5:
+                score+=3
+            scored.append((score,matched,name,item))
+    scored.sort(key=lambda x:(-x[0],-x[1],x[2]))
+    # Avoid unrelated results from a very weak overlap.
+    if not scored or scored[0][0]<4:
+        return []
+    return [x[3] for x in scored[:max(1,min(int(limit),200))]]
+
 def product_context(query:str, limit=8):
     """Provide AI with best-ranked catalogue matches, their descriptions and variants."""
     matches=intent_products(query, limit)
     if not matches:
+        matches=fuzzy_catalog_products(query,limit)
+    if not matches:
         matches=search_products(query,limit)
+    # Merge fuzzy matches to catch keywords embedded in long sentences or misspelled words.
+    fuzzy=fuzzy_catalog_products(query,limit)
+    seen_ids={str(p.get('id')) for p in matches}
+    for p in fuzzy:
+        if str(p.get('id')) not in seen_ids:
+            matches.append(p); seen_ids.add(str(p.get('id')))
+        if len(matches)>=limit:
+            break
     out=[]
     for p in matches[:limit]:
         variants=[]
@@ -760,6 +862,12 @@ def conversational_keyboard(user_text:str, history:list, answer:str):
 
     # Include relevant catalog items, including newly imported CSV products.
     all_relevant=intent_products(q, 200)
+    relevant_ids={str(p.get('id')) for p in all_relevant}
+    for p in fuzzy_catalog_products(q, 200):
+        if str(p.get('id')) not in relevant_ids:
+            all_relevant.append(p); relevant_ids.add(str(p.get('id')))
+        if len(all_relevant)>=200:
+            break
     for p in all_relevant:
         pid=str(p.get('id'))
         if pid not in seen and len(products)<5:
@@ -856,6 +964,10 @@ def product_status_answer(query:str):
     if not (wants_stock or wants_price or asks_existence):
         return None
     candidates=product_name_matches(q)
+    if not candidates:
+        fuzzy=fuzzy_catalog_products(q,5)
+        if fuzzy and any(x in q for x in ('دارید','دارین','موجود','قیمت','چنده','چقدر','وجود داره','پیدا میشه')):
+            candidates=fuzzy[:3]
     if not candidates:
         # Strip question wording and search the remaining product phrase.
         cleaned=re.sub(r'\b(آیا|این|اون|محصول|کالا|توی|داخل|فروشگاه|لیانا|موجود|موجوده|هست|هستش|دارید|دارین|قیمت|چنده|چقدر|رو|را|میخوام|میخوام|وجود|داره|پیدا|میشه|می شود|است)\b',' ',q)
@@ -1024,8 +1136,31 @@ def offline_answer(user_text:str, history=None)->str:
                 price_text=(' — '+ '، '.join(prices)) if prices else ''
                 lines.append('• '+p.get('name','محصول')+price_text)
             return 'حتماً عزیزم 🌷 این گزینه‌ها رو از محصولات لیانا برات پیدا کردم:\n\n'+'\n'.join(lines)+'\n\nروی دکمه‌ی محصولی که دوست داری بزن تا جزئیاتش رو ببینی. اگر رنگ یا مدل خاصی مدنظرت هست بگو تا دقیق‌تر بگردم.'
+    # Generic availability/recommendation phrasing: use fuzzy matching over the full message.
+    shopping_markers=('دارید','دارین','موجود','پیشنهاد','معرفی','دنبال','میخوام','می خواهم',
+                      'می خوام','پیدا کن','چی خوبه','چی مناسبه','برای من','به درد','میگردم','می گردم')
+    if any(normalize_fa(x) in q for x in shopping_markers):
+        found=fuzzy_catalog_products(user_text,6)
+        if found:
+            lines=[]
+            for item in found[:6]:
+                price=money_toman((item.get('variants') or [{}])[0].get('price_raw'))
+                lines.append('🧴 '+item.get('name','محصول')+(' — '+price if price else ''))
+            return 'حتماً 🌷 از روی توضیحت این محصولات مرتبط رو در لیانا پیدا کردم:\n\n'+'\n'.join(lines)+'\n\nبرای دیدن جزئیات هر محصول روی دکمه‌اش بزن. اگر منظورت کاربرد خاصی بوده، بگو تا پیشنهادها رو دقیق‌تر کنم.'
     smart=recommendation_answer(user_text)
     if smart: return smart
+    # Long natural-language shopping messages: retrieve actual catalog matches even if
+    # no exact intent phrase was recognized (including misspellings and colloquial wording).
+    shopping_markers=('دارید','دارین','موجود','پیشنهاد','معرفی','دنبال','میخوام','می خواهم','می خوام',
+                      'پیدا کن','چی خوبه','چی مناسبه','برای من','به درد','میگردم','می گردم','می‌گردم')
+    if any(normalize_fa(x) in q for x in shopping_markers):
+        fuzzy=fuzzy_catalog_products(q,6)
+        if fuzzy:
+            lines=[]
+            for item in fuzzy[:6]:
+                price=money_toman((item.get('variants') or [{}])[0].get('price_raw'))
+                lines.append('• '+esc(item.get('name','محصول'))+(' — '+esc(price) if price else ''))
+            return '🔎 از روی کلمات کلیدی پیامت این گزینه‌های مرتبط رو در محصولات لیانا پیدا کردم 🌷\n\n'+'\n'.join(lines)+'\n\nبرای دیدن جزئیات، روی دکمه محصول بزن. اگر کاربرد یا مدل خاصی مدنظرت هست بگو تا دقیق‌تر بگردم.'
     # Answer stock/price/existence questions against product names and catalog records first.
     status=product_status_answer(q)
     if status: return status
