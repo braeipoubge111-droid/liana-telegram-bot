@@ -211,35 +211,17 @@ def variant_lines(p):
     for v in p.get('variants',[]):
         attr=(v.get('attribute') or v.get('name') or '').strip()
         price=money_toman(v.get('price_raw'))
-        stock=customer_stock_status(v.get('stock_file') or p.get('stock_file'))
         bits=[]
         if attr: bits.append(esc(attr))
         if price: bits.append('<b>'+esc(price)+'</b>')
-        bits.append('وضعیت موجودی: '+esc(stock))
         out.append('• '+' — '.join(bits))
     return out
 
 def product_text(p):
-    """Render a warm, readable product card using stored copy first, without inventing facts."""
+    """Render a concise product card without generated descriptions or stock disclaimers."""
     name=str(p.get('name') or 'محصول').strip()
     category=str(p.get('category') or 'سایر محصولات').strip()
     lines=[f"<b>✨ {esc(name)}</b>", f"<b>🗂 دسته‌بندی:</b> {esc(category)}"]
-
-    stored=str(p.get('description') or '').strip()
-    normalized=normalize_fa(stored)
-    generic_copy=(
-        'این محصول برای روتین مراقبت یا بهداشت شخصی عرضه شده',
-        'این محصول از دسته',
-        'این کالا در دسته',
-        'برای تکمیل آرایش چشم استفاده می شود',
-        'این محصول برای آرایش لب است',
-    )
-    if not stored or any(normalize_fa(x) in normalized for x in generic_copy):
-        bio=describe_product(p)
-    else:
-        bio=stored
-    if bio:
-        lines.extend(['', '<b>🌷 درباره محصول</b>', esc(bio)])
 
     variants=p.get('variants') or []
     labels=[]
@@ -249,11 +231,11 @@ def product_text(p):
             labels.append(attr)
     if labels:
         lines.extend(['', '<b>📦 تنوع / بسته‌بندی ثبت‌شده:</b> '+ '، '.join(esc(x) for x in labels)])
+
     prices=variant_lines(p)
     if prices:
-        lines.extend(['', '<b>💰 قیمت و وضعیت ثبت‌شده:</b>', '\n'.join(prices)])
-    lines.extend(['', '<i>قیمت و موجودی ممکن است تغییر کند. ویژگی‌هایی مثل رنگ دقیق، ترکیبات و ماندگاری را فقط در صورت درج مشخصات سازنده قطعی بدان.</i>'])
-    return '\n'.join(lines)
+        lines.extend(['', '<b>💰 قیمت ثبت‌شده:</b>', '\\n'.join(prices)])
+    return '\\n'.join(lines)
 
 def esc(s):
     import html
