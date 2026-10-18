@@ -158,6 +158,7 @@ async def csv_refresh_loop():
         await refresh_csv_feed()
 PAGE_SIZE=8
 SEARCH_PAGE_QUERIES={}  # شناسه کوتاه برای نگهداری عبارت جست‌وجو بین صفحات
+AI_PAGE_PRODUCTS={}  # فهرست پیشنهادهای هوش مصنوعی برای صفحه‌بندی
 bot=Bot(TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp=Dispatcher()
 
@@ -234,8 +235,8 @@ def product_text(p):
 
     prices=variant_lines(p)
     if prices:
-        lines.extend(['', '<b>💰 قیمت ثبت‌شده:</b>', '\\n'.join(prices)])
-    return '\\n'.join(lines)
+        lines.extend(['', '<b>💰 قیمت ثبت‌شده:</b>', '\n'.join(prices)])
+    return '\n'.join(lines)
 
 def esc(s):
     import html
@@ -691,7 +692,7 @@ def intent_products(query, limit=8):
     families=intent_families(q)
     if not families:
         return out
-    per_family=max(2, min(4, limit//max(1,len(families))))
+    per_family=max(2, min(20, limit//max(1,len(families))))
     for family, markers in families:
         candidates=search_products(family,20)
         strict=[]
@@ -719,7 +720,7 @@ def intent_products(query, limit=8):
                 break
         if len(out)>=limit:
             break
-    return out[:max(1,min(int(limit),20))]
+    return out[:max(1,min(int(limit),200))]
 
 def related_products(p, limit=3):
     """Return related items from the same use/category without duplicating the original."""
@@ -742,33 +743,48 @@ def related_products(p, limit=3):
     return [x[1] for x in ranked[:limit]]
 
 def conversational_keyboard(user_text:str, history:list, answer:str):
-    """Attach real product detail and direct product-page buttons to relevant AI answers."""
+    """Attach real product buttons and a paginated list of all relevant AI suggestions."""
     q=normalize_fa(contextual_query(user_text,history or []))
     a=normalize_fa(answer)
     rows=[]; products=[]; seen=set()
-    # Prefer products the answer explicitly names.
+
+    # Prefer products explicitly named in the answer.
     for p in DATA:
         if not p.get('published',True):
             continue
         name=normalize_fa(p.get('name',''))
-        if len(name)>=5 and name in a and str(p.get('id')) not in seen:
+        if len(name)>=4 and name in a and str(p.get('id')) not in seen:
             products.append(p); seen.add(str(p.get('id')))
             if len(products)>=5:
                 break
-    # Then use all product families inferred from the whole message, not just its first keyword.
-    if len(products)<5:
-        for p in intent_products(q, 8):
-            pid=str(p.get('id'))
-            if pid not in seen:
-                products.append(p); seen.add(pid)
-            if len(products)>=5:
-                break
+
+    # Include relevant catalog items, including newly imported CSV products.
+    all_relevant=intent_products(q, 200)
+    for p in all_relevant:
+        pid=str(p.get('id'))
+        if pid not in seen and len(products)<5:
+            products.append(p); seen.add(pid)
+
     for p in products[:5]:
         row=[btn('🧴 '+str(p.get('name','محصول'))[:42],f"product:{p['id']}")]
         url=str(p.get('product_url') or '').strip()
         if url.startswith(('https://','http://')):
             row.append(btn('🔗 صفحه محصول',url=url))
         rows.append(row)
+
+    # Save the full matching list and provide paging for long recommendation lists.
+    merged=[]; merged_seen=set()
+    for p in products + all_relevant:
+        pid=str(p.get('id'))
+        if pid not in merged_seen:
+            merged.append(p); merged_seen.add(pid)
+    if len(merged)>5:
+        page_key=hashlib.md5((str(user_text)+str(time.time_ns())).encode('utf-8')).hexdigest()[:8]
+        AI_PAGE_PRODUCTS[page_key]=[str(p.get('id')) for p in merged]
+        while len(AI_PAGE_PRODUCTS)>100:
+            AI_PAGE_PRODUCTS.pop(next(iter(AI_PAGE_PRODUCTS)))
+        rows.append([btn('📄 دیدن همه پیشنهادها ('+str(len(merged))+' محصول)','aipage:0:'+page_key)])
+
     store_intent=any(x in q for x in ('فروشگاه','لیانا','آدرس','شماره تماس','شماره فروشگاه','ساعت کاری','شعبه','ارسال','سفارش','اطلاعات فروشگاه','کجاست','کجا هستید'))
     if store_intent:
         rows.append([btn('🏬 اطلاعات کامل فروشگاه','shop'),btn('🛒 سایت فروشگاه',url=SHOP_URL)])
@@ -1151,6 +1167,8 @@ async def text_search(m:Message):
         return
     if uid in AI_USERS and not q.startswith('/'):
         if len(q)<2: return
+        # Reload a locally replaced WooCommerce CSV before AI product lookup.
+        load_local_csv()
         history=history_get(uid)
         interpreted=contextual_query(q,history)
         # Let greetings, casual conversation, store questions and recommendation requests reach intent handling.
@@ -1230,6 +1248,27 @@ async def cb_searchpage(c:CallbackQuery):
 async def cb_qpage(c:CallbackQuery):
     _,page,key=c.data.split(':',2); page=int(page); items=matching_question(key)
     await c.message.edit_text("<b>💡 پیشنهادهای دسته‌بندی‌شده</b>\nاین فهرست از دسته‌بندی نام محصولات ساخته شده؛ برای سازگاری با نوع پوست، مشخصات سازنده را بررسی کن.",reply_markup=paginated(items,page,'qpage:'+key)); await c.answer()
+@dp.callback_query(F.data.startswith('aipage:'))
+async def cb_aipage(c:CallbackQuery):
+    try:
+        _, page_text, page_key = c.data.split(':', 2)
+        page = max(0, int(page_text))
+        ids = AI_PAGE_PRODUCTS.get(page_key, [])
+    except (ValueError, TypeError):
+        await c.answer('فهرست پیشنهادها در دسترس نیست؛ سؤال را دوباره بپرس.', show_alert=True)
+        return
+    items = [p for pid in ids if (p := find(pid)) and p.get('published', True)]
+    if not items:
+        await c.answer('فهرست پیشنهادها در دسترس نیست؛ سؤال را دوباره بپرس.', show_alert=True)
+        return
+    total_pages = max(1, (len(items) + PAGE_SIZE - 1) // PAGE_SIZE)
+    page = min(page, total_pages - 1)
+    await c.message.answer(
+        f"<b>🌷 همه پیشنهادهای مرتبط</b>\\nصفحه {page+1} از {total_pages} — {len(items)} محصول",
+        reply_markup=paginated(items, page, 'aipage:'+page_key)
+    )
+    await c.answer()
+
 @dp.callback_query(F.data.startswith('product:'))
 async def cb_product(c:CallbackQuery):
     p=find(c.data.split(':',1)[1])
