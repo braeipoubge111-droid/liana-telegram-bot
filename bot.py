@@ -27,6 +27,9 @@ DB_PATH=Path(__file__).with_name("bot_data.sqlite3")
 AI_USERS=set()                 # users currently chatting with AI
 OWNER_PASSWORD_PENDING=set()   # owner IDs currently entering password
 OWNER_AI_USERS=set()           # owner IDs authenticated for AI testing
+OWNER_STATES={}                # owner-only multi-step management workflow
+OWNER_OVERRIDES_PATH=Path(__file__).with_name('owner_overrides.json')
+OWNER_LEARNING_PATH=Path(__file__).with_name('owner_learning.json')
 DATA=json.loads(Path(__file__).with_name("products.json").read_text(encoding="utf-8"))
 
 # محصولات فایل CSV ووکامرس به کاتالوگ اصلی اضافه/به‌روزرسانی می‌شوند.
@@ -124,6 +127,7 @@ def _merge_csv_products(csv_products):
         else:
             merged.append(fresh)
     DATA[:] = merged
+    apply_owner_overrides()
     return len(csv_products)
 
 def load_local_csv():
@@ -236,6 +240,9 @@ def product_text(p):
     prices=variant_lines(p)
     if prices:
         lines.extend(['', '<b>💰 قیمت ثبت‌شده:</b>', '\n'.join(prices)])
+    bio=str(p.get('description') or '').strip()
+    if bio:
+        lines.extend(['', '<b>📝 درباره محصول:</b>', esc(bio)])
     return '\n'.join(lines)
 
 def esc(s):
@@ -272,6 +279,15 @@ async def start(m:Message):
     OWNER_PASSWORD_PENDING.discard(m.from_user.id)
     history_clear(m.from_user.id)
     await m.answer(HOME_TEXT,reply_markup=home_kb())
+@dp.message(Command('owner'))
+async def owner_command(m:Message):
+    uid=m.from_user.id
+    if owner_is_authenticated(uid):
+        OWNER_STATES.pop(uid,None)
+        await m.answer('👑 پنل مدیریت لیانا',reply_markup=owner_panel_kb())
+    else:
+        await m.answer('برای ورود، از بخش هوش مصنوعی گزینه «من صاحب ربات هستم» را بزن.')
+
 @dp.message(Command("home"))
 async def home(m:Message):
     AI_USERS.discard(m.from_user.id)
@@ -330,6 +346,81 @@ def quota_increment(user_id:int):
 
 def is_owner_id(user_id:int)->bool:
     return bool(OWNER_TELEGRAM_ID and str(user_id)==OWNER_TELEGRAM_ID)
+
+def owner_json_read(path, default):
+    try:
+        value=json.loads(path.read_text(encoding='utf-8'))
+        return value if isinstance(value, type(default)) else default
+    except Exception:
+        return default
+
+def owner_json_write(path, value):
+    tmp=path.with_suffix(path.suffix+'.tmp')
+    tmp.write_text(json.dumps(value,ensure_ascii=False,indent=2),encoding='utf-8')
+    tmp.replace(path)
+
+def apply_owner_overrides():
+    """Apply persistent owner edits after product/feed imports."""
+    overrides=owner_json_read(OWNER_OVERRIDES_PATH,{})
+    if not isinstance(overrides,dict): return
+    for item in DATA:
+        ov=overrides.get(str(item.get('id')))
+        if not isinstance(ov,dict): continue
+        for field in ('description','stock_file'):
+            if field in ov: item[field]=ov[field]
+        if 'price_raw' in ov:
+            variants=item.get('variants') or []
+            if variants:
+                for variant in variants: variant['price_raw']=str(ov['price_raw'])
+            else:
+                item['variants']=[{'id':str(item.get('id','')),'name':str(item.get('name','')),'attribute':'','price_raw':str(ov['price_raw']),'stock_file':str(item.get('stock_file') or 'نامشخص')}]
+
+def owner_panel_kb():
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [btn('💰 تغییر قیمت محصول','owner:edit:price'),btn('📦 تغییر موجودی','owner:edit:stock')],
+        [btn('📝 ویرایش بیوی محصول','owner:edit:description')],
+        [btn('🧠 آموزش پاسخ به سؤال‌ها','owner:teach:faq')],
+        [btn('🛍 آموزش پیشنهاد یک محصول','owner:teach:product')],
+        [btn('🤖 آزمایش هوش مصنوعی','owner:testai')],
+        [btn('🏠 بازگشت به خانه','home')]
+    ])
+
+def owner_is_authenticated(uid:int)->bool:
+    return is_owner_id(uid) and uid in OWNER_AI_USERS
+
+def owner_learning():
+    data=owner_json_read(OWNER_LEARNING_PATH,{'faqs':[],'rules':[]})
+    if not isinstance(data,dict): data={'faqs':[],'rules':[]}
+    data.setdefault('faqs',[]); data.setdefault('rules',[])
+    return data
+
+def learned_owner_answer(query:str):
+    """Return owner-taught FAQ or product recommendation before generic AI."""
+    q=normalize_fa(query)
+    learned=owner_learning()
+    for rule in learned.get('rules',[]):
+        keys=[normalize_fa(x) for x in rule.get('keywords',[]) if str(x).strip()]
+        if keys and any(k and k in q for k in keys):
+            prod=find(rule.get('product_id'))
+            if prod:
+                return str(rule.get('intro') or 'حتماً 🌷 این محصول از فروشگاه لیانا با توضیحت مرتبطه:')+'\n\n🧴 '+str(prod.get('name',''))+'\n'+str(prod.get('description') or describe_product(prod))
+    from difflib import SequenceMatcher
+    best=None; best_score=0
+    q_tokens=set(q.split())
+    for item in learned.get('faqs',[]):
+        keys=[normalize_fa(x) for x in item.get('keywords',[]) if str(x).strip()]
+        score=0
+        for key in keys:
+            if key and key in q: score=max(score,12+len(key.split()))
+            else:
+                kt=set(key.split())
+                overlap=len(kt & q_tokens)
+                if overlap: score=max(score,overlap*4 + overlap/max(1,len(kt))*4)
+                elif key:
+                    if any(SequenceMatcher(None,t,key).ratio()>=0.86 for t in q_tokens if len(t)>=4): score=max(score,5)
+        if score>best_score: best=item; best_score=score
+    if best and best_score>=7: return str(best.get('answer') or '') or None
+    return None
 
 def ai_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -900,8 +991,10 @@ def conversational_keyboard(user_text:str, history:list, answer:str):
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 def knowledge_answer(q:str):
-    """Semantic-ish offline retrieval: normalize colloquial Persian, expand synonyms,
-    score phrase/token overlap and tolerate small typos without using external APIs."""
+    """Semantic-ish offline retrieval plus owner-taught answers, without external APIs."""
+    learned=learned_owner_answer(q)
+    if learned:
+        return learned
     try:
         kb=json.loads((Path(__file__).with_name('beauty_knowledge.json')).read_text(encoding='utf-8'))
     except Exception:
@@ -1217,6 +1310,9 @@ async def call_groq(user_text:str, history=None):
     history=history or []
     interpreted_text=contextual_query(user_text,history)
     q=normalize_fa(interpreted_text)
+    taught=learned_owner_answer(interpreted_text)
+    if taught:
+        return taught
     # Price/stock/existence questions must be grounded in the store's current catalog data.
     if any(x in q for x in ('قیمت','چنده','چقدر','موجود','دارید','دارین','وجود داره','هست یا نه','پیدا میشه')):
         local=product_status_answer(interpreted_text)
@@ -1285,6 +1381,92 @@ async def cb_ai_exit(c:CallbackQuery):
     await c.message.answer('از حالت هوش مصنوعی خارج شدی 🌷',reply_markup=home_kb())
     await c.answer()
 
+@dp.callback_query(F.data=='owner:panel')
+async def cb_owner_panel(c:CallbackQuery):
+    if not owner_is_authenticated(c.from_user.id):
+        await c.answer('ابتدا از گزینه «من صاحب ربات هستم» وارد شو.',show_alert=True); return
+    OWNER_STATES.pop(c.from_user.id,None)
+    await c.message.answer('👑 <b>پنل مدیریت لیانا</b>\nچه چیزی را می‌خواهی تغییر بدهی؟',reply_markup=owner_panel_kb())
+    await c.answer()
+
+@dp.callback_query(F.data.startswith('owner:edit:'))
+async def cb_owner_edit(c:CallbackQuery):
+    uid=c.from_user.id
+    if not owner_is_authenticated(uid):
+        await c.answer('دسترسی مدیریت ندارید.',show_alert=True); return
+    field=c.data.rsplit(':',1)[-1]
+    labels={'price':'قیمت','stock':'موجودی','description':'بیوی محصول'}
+    OWNER_STATES[uid]={'step':'product_search','field':field}
+    await c.message.answer(f'🔎 اسم محصولی که می‌خواهی {labels.get(field,"اطلاعاتش")} را تغییر بدهی بفرست. می‌توانی بخشی از نام را هم بنویسی.')
+    await c.answer()
+
+@dp.callback_query(F.data.startswith('owner:pick:'))
+async def cb_owner_pick(c:CallbackQuery):
+    uid=c.from_user.id
+    if not owner_is_authenticated(uid):
+        await c.answer('دسترسی مدیریت ندارید.',show_alert=True); return
+    parts=c.data.split(':',3)
+    if len(parts)!=4:
+        await c.answer('درخواست نامعتبر است.',show_alert=True); return
+    _,_,field,pid=parts
+    product=find(pid)
+    if not product:
+        await c.answer('محصول پیدا نشد.',show_alert=True); return
+    OWNER_STATES[uid]={'step':'value','field':field,'product_id':str(pid)}
+    prompts={
+      'price':f'💰 قیمت جدید برای «{product.get("name","")}» را فقط به عدد تومان بفرست. این قیمت روی همه تنوع‌های این محصول اعمال می‌شود.',
+      'stock':f'📦 وضعیت جدید موجودی «{product.get("name","")}» را بفرست؛ مثلاً «موجود»، «ناموجود» یا «برای استعلام تماس بگیرید».',
+      'description':f'📝 بیوی جدید محصول «{product.get("name","")}» را کامل بفرست. همین متن جایگزین بیوی قبلی می‌شود.'}
+    await c.message.answer(prompts.get(field,'مقدار جدید را بفرست.'))
+    await c.answer()
+
+@dp.callback_query(F.data=='owner:teach:faq')
+async def cb_owner_teach_faq(c:CallbackQuery):
+    uid=c.from_user.id
+    if not owner_is_authenticated(uid):
+        await c.answer('دسترسی مدیریت ندارید.',show_alert=True); return
+    OWNER_STATES[uid]={'step':'faq_keywords'}
+    await c.message.answer('🧠 <b>آموزش پاسخ جدید</b>\nکلمه‌ها یا جمله‌هایی را که مشتری ممکن است بگوید بفرست؛ چند مورد را با علامت | جدا کن.\nمثال: ارسال دارید؟ | هزینه ارسال چقدره | ارسال به شهرستان')
+    await c.answer()
+
+@dp.callback_query(F.data=='owner:teach:product')
+async def cb_owner_teach_product(c:CallbackQuery):
+    uid=c.from_user.id
+    if not owner_is_authenticated(uid):
+        await c.answer('دسترسی مدیریت ندارید.',show_alert=True); return
+    OWNER_STATES[uid]={'step':'rule_keywords'}
+    await c.message.answer('🛍 <b>آموزش پیشنهاد محصول</b>\nعبارت‌ها یا کلمه‌های کلیدی مشتری را با | جدا کن.\nمثال: هدیه دخترونه | چیز فانتزی | ناخن کاپی بارا')
+    await c.answer()
+
+@dp.callback_query(F.data=='owner:testai')
+async def cb_owner_testai(c:CallbackQuery):
+    if not owner_is_authenticated(c.from_user.id):
+        await c.answer('دسترسی مدیریت ندارید.',show_alert=True); return
+    AI_USERS.add(c.from_user.id)
+    await c.message.answer('🤖 حالت آزمایش فعال شد. مثل مشتری سؤال بپرس؛ برای برگشت به پنل، /owner را بفرست.')
+    await c.answer()
+
+@dp.callback_query(F.data.startswith('owner:rulepick:'))
+async def cb_owner_rulepick(c:CallbackQuery):
+    uid=c.from_user.id
+    if not owner_is_authenticated(uid):
+        await c.answer('دسترسی مدیریت ندارید.',show_alert=True); return
+    parts=c.data.split(':',3)
+    if len(parts)!=4:
+        await c.answer('درخواست نامعتبر است.',show_alert=True); return
+    keyhash=parts[2]; pid=parts[3]
+    state=OWNER_STATES.get(uid,{})
+    keys=state.get('keywords',[])
+    product=find(pid)
+    if not product or not keys:
+        await c.answer('اطلاعات آموزش پیدا نشد؛ دوباره شروع کن.',show_alert=True); return
+    learned=owner_learning()
+    learned['rules'].append({'keywords':keys,'product_id':str(pid),'intro':'حتماً 🌷 با توجه به چیزی که گفتی، این محصول رو از لیانا پیشنهاد می‌کنم:'})
+    owner_json_write(OWNER_LEARNING_PATH,learned)
+    OWNER_STATES.pop(uid,None)
+    await c.message.answer('✅ قانون پیشنهاد محصول ذخیره شد. هر وقت مشتری یکی از این عبارت‌ها را بنویسد، این محصول در پاسخ پیشنهاد می‌شود.\n\nکلمات کلیدی: '+', '.join(keys)+'\nمحصول: '+str(product.get('name','')),reply_markup=owner_panel_kb())
+    await c.answer()
+
 @dp.message(F.text)
 async def text_search(m:Message):
     uid=m.from_user.id
@@ -1294,12 +1476,92 @@ async def text_search(m:Message):
         except Exception: pass
         OWNER_PASSWORD_PENDING.discard(uid)
         if is_owner_id(uid) and OWNER_PASSWORD and q==OWNER_PASSWORD:
-            OWNER_AI_USERS.add(uid); AI_USERS.add(uid)
-            await m.answer('✅ حالت آزمایشی صاحب ربات فعال شد. پاسخ‌گویی محلی فعال است و به API نیاز ندارد.',reply_markup=ai_kb())
+            OWNER_AI_USERS.add(uid); AI_USERS.discard(uid); OWNER_STATES.pop(uid,None)
+            await m.answer('✅ ورود مدیریت موفق بود. از این پنل می‌توانی قیمت، موجودی، بیوی محصولات و آموزش پاسخ‌های هوش مصنوعی را تغییر بدهی.',reply_markup=owner_panel_kb())
         else:
             OWNER_AI_USERS.discard(uid)
             await m.answer('❌ رمز یا دسترسی صاحب ربات معتبر نیست.',reply_markup=home_kb())
         return
+    if uid in OWNER_STATES and owner_is_authenticated(uid) and not q.startswith('/'):
+        state=OWNER_STATES[uid]
+        step=state.get('step')
+        if step=='product_search':
+            field=state.get('field','price')
+            matches=search_products(q,limit=12)
+            if not matches:
+                await m.answer('محصولی با این عبارت پیدا نکردم. نام کوتاه‌تر یا بخشی از نام محصول را بفرست.')
+                return
+            rows=[]
+            for item in matches[:12]:
+                rows.append([btn('🧴 '+str(item.get('name','محصول'))[:45],f"owner:pick:{field}:{item.get('id')}")])
+            rows.append([btn('↩️ پنل مدیریت','owner:panel')])
+            await m.answer('کدام محصول را می‌خواهی ویرایش کنی؟',reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+            return
+        if step=='value':
+            pid=str(state.get('product_id','')); field=state.get('field','')
+            product=find(pid)
+            if not product:
+                OWNER_STATES.pop(uid,None); await m.answer('محصول پیدا نشد؛ دوباره از پنل شروع کن.',reply_markup=owner_panel_kb()); return
+            overrides=owner_json_read(OWNER_OVERRIDES_PATH,{})
+            if not isinstance(overrides,dict): overrides={}
+            ov=overrides.setdefault(pid,{})
+            if field=='price':
+                digits=re.sub(r'[^0-9۰-۹٠-٩]','',q).translate(str.maketrans('۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩','01234567890123456789'))
+                if not digits:
+                    await m.answer('قیمت را به عدد تومان بفرست؛ مثلاً 125000.'); return
+                ov['price_raw']=str(int(digits))
+                reply='قیمت جدید ذخیره شد و روی همه تنوع‌های این محصول اعمال شد. 💰'
+            elif field=='stock':
+                if len(q)>120:
+                    await m.answer('لطفاً وضعیت موجودی را کوتاه بنویس؛ مثلاً موجود یا ناموجود.'); return
+                ov['stock_file']=q
+                reply='وضعیت موجودی ذخیره شد. 📦'
+            elif field=='description':
+                if len(q)<5:
+                    await m.answer('بیو کمی کوتاه است؛ متن کامل‌تری بفرست یا حداقل ۵ نویسه وارد کن.'); return
+                ov['description']=q[:3000]
+                reply='بیوی جدید ذخیره شد و در کارت محصول و زمینه پاسخ‌گویی هوش مصنوعی استفاده می‌شود. 📝'
+            else:
+                await m.answer('نوع ویرایش مشخص نیست.'); return
+            owner_json_write(OWNER_OVERRIDES_PATH,overrides)
+            apply_owner_overrides()
+            OWNER_STATES.pop(uid,None)
+            await m.answer('✅ '+reply+'\n\n'+product_text(product),reply_markup=owner_panel_kb())
+            return
+        if step=='faq_keywords':
+            keys=[x.strip() for x in q.split('|') if x.strip()]
+            if not keys:
+                await m.answer('حداقل یک کلمه یا عبارت بفرست.'); return
+            OWNER_STATES[uid]={'step':'faq_answer','keywords':keys}
+            await m.answer('✍️ حالا پاسخ دلخواه ربات را بفرست. این پاسخ برای سؤال‌های مشابه استفاده می‌شود.')
+            return
+        if step=='faq_answer':
+            if len(q)<2:
+                await m.answer('پاسخ خیلی کوتاه است؛ پاسخ کامل‌تری بفرست.'); return
+            learned=owner_learning(); learned['faqs'].append({'keywords':state.get('keywords',[]),'answer':q[:3000]})
+            owner_json_write(OWNER_LEARNING_PATH,learned); OWNER_STATES.pop(uid,None)
+            await m.answer('✅ آموزش پاسخ ذخیره شد. از این به بعد برای عبارت‌های مشابه، این جواب در اولویت است.\nبرای آموزش بعدی از پنل مدیریت استفاده کن.',reply_markup=owner_panel_kb())
+            return
+        if step=='rule_keywords':
+            keys=[x.strip() for x in q.split('|') if x.strip()]
+            if not keys:
+                await m.answer('حداقل یک کلمه یا عبارت بفرست.'); return
+            OWNER_STATES[uid]={'step':'rule_product_search','keywords':keys}
+            await m.answer('🔎 حالا اسم محصولی را بفرست که می‌خواهی با این عبارت‌ها پیشنهاد شود.')
+            return
+        if step=='rule_product_search':
+            matches=search_products(q,limit=12)
+            if not matches:
+                await m.answer('محصولی پیدا نشد؛ اسم محصول را کوتاه‌تر یا دقیق‌تر بفرست.'); return
+            keys=state.get('keywords',[])
+            rows=[[btn('🧴 '+str(item.get('name','محصول'))[:45],f"owner:rulepick:{hashlib.md5('|'.join(keys).encode()).hexdigest()[:6]}:{item.get('id')}")] for item in matches[:12]]
+            OWNER_STATES[uid]={'step':'rule_choose','keywords':keys,'choices':{hashlib.md5('|'.join(keys).encode()).hexdigest()[:6]:keys}}
+            # Keep the exact keyword list in state; callback only needs the product id.
+            await m.answer('کدام محصول را در پاسخ به این عبارت‌ها پیشنهاد بدهم؟',reply_markup=InlineKeyboardMarkup(inline_keyboard=rows+[[btn('↩️ پنل مدیریت','owner:panel')]]))
+            return
+        if step=='rule_choose':
+            await m.answer('از دکمه‌های محصولی که نمایش داده شده انتخاب کن.')
+            return
     if uid in AI_USERS and not q.startswith('/'):
         if len(q)<2: return
         # Reload a locally replaced WooCommerce CSV before AI product lookup.
@@ -1471,7 +1733,9 @@ async def main():
     if not isinstance(DATA, list):
         raise SystemExit('products.json باید فهرستی از محصولات باشد.')
     if not TOKEN: raise SystemExit('BOT_TOKEN را در فایل .env وارد کن؛ از BotFather دریافت می‌شود.')
+    apply_owner_overrides()
     local_count=load_local_csv()
+    apply_owner_overrides()
     print(f"[CSV] فایل محلی بررسی شد؛ {local_count} محصول CSV، کل کاتالوگ فعلی: {len(DATA)}")
     await refresh_csv_feed()
     asyncio.create_task(csv_refresh_loop())
