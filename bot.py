@@ -360,9 +360,16 @@ def owner_json_write(path, value):
     tmp.replace(path)
 
 def apply_owner_overrides():
-    """Apply persistent owner edits after product/feed imports."""
+    """Apply persistent owner edits, custom products and deletion tombstones."""
     overrides=owner_json_read(OWNER_OVERRIDES_PATH,{})
     if not isinstance(overrides,dict): return
+    deleted={str(x) for x in overrides.get('_deleted_ids',[])}
+    custom=overrides.get('_custom_products',[])
+    known={str(p.get('id')) for p in DATA if isinstance(p,dict)}
+    for product in custom if isinstance(custom,list) else []:
+        if isinstance(product,dict) and str(product.get('id')) not in known:
+            DATA.append(product); known.add(str(product.get('id')))
+    DATA[:] = [p for p in DATA if str(p.get('id')) not in deleted]
     for item in DATA:
         ov=overrides.get(str(item.get('id')))
         if not isinstance(ov,dict): continue
@@ -379,6 +386,7 @@ def owner_panel_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [btn('💰 تغییر قیمت محصول','owner:edit:price'),btn('📦 تغییر موجودی','owner:edit:stock')],
         [btn('📝 ویرایش بیوی محصول','owner:edit:description')],
+        [btn('➕ افزودن محصول جدید','owner:add'),btn('🗑 حذف محصول','owner:delete')],
         [btn('🧠 آموزش پاسخ به سؤال‌ها','owner:teach:faq')],
         [btn('🛍 آموزش پیشنهاد یک محصول','owner:teach:product')],
         [btn('🤖 آزمایش هوش مصنوعی','owner:testai')],
@@ -1420,6 +1428,54 @@ async def cb_owner_pick(c:CallbackQuery):
     await c.message.answer(prompts.get(field,'مقدار جدید را بفرست.'))
     await c.answer()
 
+@dp.callback_query(F.data=='owner:add')
+async def cb_owner_add(c:CallbackQuery):
+    uid=c.from_user.id
+    if not owner_is_authenticated(uid):
+        await c.answer('دسترسی مدیریت ندارید.',show_alert=True); return
+    OWNER_STATES[uid]={'step':'add_name','product':{}}
+    await c.message.answer('➕ افزودن محصول جدید\n۱ از ۶: اسم کامل محصول را بفرست.')
+    await c.answer()
+
+@dp.callback_query(F.data=='owner:delete')
+async def cb_owner_delete(c:CallbackQuery):
+    uid=c.from_user.id
+    if not owner_is_authenticated(uid):
+        await c.answer('دسترسی مدیریت ندارید.',show_alert=True); return
+    OWNER_STATES[uid]={'step':'delete_search'}
+    await c.message.answer('🗑 اسم محصولی را که می‌خواهی حذف کنی بفرست. بعد از انتخاب، تأیید حذف می‌گیرم.')
+    await c.answer()
+
+@dp.callback_query(F.data.startswith('owner:delpick:'))
+async def cb_owner_delpick(c:CallbackQuery):
+    uid=c.from_user.id
+    if not owner_is_authenticated(uid):
+        await c.answer('دسترسی مدیریت ندارید.',show_alert=True); return
+    pid=c.data.split(':',2)[2]; product=find(pid)
+    if not product:
+        await c.answer('محصول پیدا نشد.',show_alert=True); return
+    OWNER_STATES[uid]={'step':'delete_confirm','product_id':str(pid)}
+    kb=InlineKeyboardMarkup(inline_keyboard=[[btn('✅ بله، حذف شود',f'owner:delconfirm:{pid}')],[btn('❌ انصراف','owner:panel')]])
+    await c.message.answer('این محصول از فهرست، جست‌وجو، دسته‌بندی و پیشنهادهای هوش مصنوعی حذف می‌شود:\n<b>'+esc(product.get('name'))+'</b>\nمطمئنی؟',reply_markup=kb)
+    await c.answer()
+
+@dp.callback_query(F.data.startswith('owner:delconfirm:'))
+async def cb_owner_delconfirm(c:CallbackQuery):
+    uid=c.from_user.id
+    if not owner_is_authenticated(uid):
+        await c.answer('دسترسی مدیریت ندارید.',show_alert=True); return
+    pid=c.data.split(':',2)[2]
+    overrides=owner_json_read(OWNER_OVERRIDES_PATH,{})
+    if not isinstance(overrides,dict): overrides={}
+    deleted={str(x) for x in overrides.get('_deleted_ids',[])}; deleted.add(pid)
+    overrides['_deleted_ids']=sorted(deleted)
+    overrides['_custom_products']=[p for p in overrides.get('_custom_products',[]) if str(p.get('id'))!=pid]
+    owner_json_write(OWNER_OVERRIDES_PATH,overrides)
+    DATA[:]=[p for p in DATA if str(p.get('id'))!=pid]
+    OWNER_STATES.pop(uid,None)
+    await c.message.answer('✅ محصول حذف شد و در بخش‌های کاتالوگ، جست‌وجو، دسته‌بندی و پیشنهاد هوش مصنوعی نمایش داده نمی‌شود.',reply_markup=owner_panel_kb())
+    await c.answer()
+
 @dp.callback_query(F.data=='owner:teach:faq')
 async def cb_owner_teach_faq(c:CallbackQuery):
     uid=c.from_user.id
@@ -1485,6 +1541,49 @@ async def text_search(m:Message):
     if uid in OWNER_STATES and owner_is_authenticated(uid) and not q.startswith('/'):
         state=OWNER_STATES[uid]
         step=state.get('step')
+        if step=='delete_search':
+            matches=search_products(q,limit=12)
+            if not matches:
+                await m.answer('محصولی پیدا نشد؛ اسم کوتاه‌تر یا دقیق‌تری بفرست.'); return
+            rows=[[btn('🗑 '+str(item.get('name','محصول'))[:42],f"owner:delpick:{item.get('id')}")] for item in matches[:12]]
+            rows.append([btn('↩️ پنل مدیریت','owner:panel')])
+            await m.answer('محصول موردنظر را انتخاب کن:',reply_markup=InlineKeyboardMarkup(inline_keyboard=rows)); return
+        if step.startswith('add_'):
+            product=state.setdefault('product',{})
+            flow=[
+              ('add_name','name','اسم کامل محصول را بفرست.'),
+              ('add_category','category','دسته‌بندی محصول را بفرست؛ مثلاً آرایش چشم و ابرو.'),
+              ('add_price','price','قیمت به تومان را به عدد بفرست؛ اگر قیمت مشخص نیست «ندارد» بنویس.'),
+              ('add_stock','stock','وضعیت موجودی را بفرست؛ مثلاً موجود یا ناموجود.'),
+              ('add_variant','variant','تنوع/بسته‌بندی را بفرست؛ مثلاً ۲۴ عددی یا «ندارد».'),
+              ('add_description','description','توضیحات محصول را بفرست؛ اگر توضیحی نداری «ندارد» بنویس.')
+            ]
+            steps=[x[0] for x in flow]
+            current=step
+            idx=steps.index(current)
+            key=flow[idx][1]
+            product[key]=q
+            if idx < len(flow)-1:
+                OWNER_STATES[uid]={'step':flow[idx+1][0],'product':product}
+                await m.answer(f'✅ ثبت شد.\n{idx+2} از ۶: {flow[idx+1][2]}'); return
+            if product['name'].strip().lower() in ('ندارد','-'):
+                await m.answer('اسم محصول نمی‌تواند خالی باشد. دوباره از افزودن محصول شروع کن.',reply_markup=owner_panel_kb()); OWNER_STATES.pop(uid,None); return
+            pid='owner_'+hashlib.sha1((product['name']+str(time.time_ns())).encode()).hexdigest()[:12]
+            price=re.sub(r'[^0-9۰-۹٠-٩]','',product.get('price','')).translate(str.maketrans('۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩','01234567890123456789'))
+            variant=product.get('variant','ندارد')
+            variants=[]
+            if variant.strip().lower() not in ('ندارد','-',''):
+                variants.append({'id':pid,'name':product['name']+' - '+variant,'attribute':variant,'price_raw':price,'stock_file':product.get('stock','نامشخص')})
+            elif price:
+                variants.append({'id':pid,'name':product['name'],'attribute':'','price_raw':price,'stock_file':product.get('stock','نامشخص')})
+            new_product={'id':pid,'sku':pid,'name':product['name'],'category':product.get('category') or _guess_category(product['name']),'description':'' if product.get('description','').strip().lower() in ('ندارد','-') else product.get('description',''),'image':'','published':True,'stock_file':product.get('stock') or 'نامشخص','variants':variants,'product_url':SHOP_URL.rstrip('/')+'/?s='+quote(product['name'])+'&post_type=product','owner_added':True}
+            overrides=owner_json_read(OWNER_OVERRIDES_PATH,{})
+            if not isinstance(overrides,dict): overrides={}
+            custom=overrides.setdefault('_custom_products',[])
+            custom.append(new_product); overrides['_deleted_ids']=[x for x in overrides.get('_deleted_ids',[]) if str(x)!=pid]
+            owner_json_write(OWNER_OVERRIDES_PATH,overrides)
+            DATA.append(new_product); OWNER_STATES.pop(uid,None)
+            await m.answer('✅ محصول اضافه شد! از حالا در جست‌وجو، دسته‌بندی‌ها و پیشنهادهای هوش مصنوعی قابل استفاده است.\n\n'+product_text(new_product),reply_markup=owner_panel_kb()); return
         if step=='product_search':
             field=state.get('field','price')
             matches=search_products(q,limit=12)
