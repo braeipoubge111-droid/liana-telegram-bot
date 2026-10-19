@@ -30,6 +30,7 @@ OWNER_AI_USERS=set()           # owner IDs authenticated for AI testing
 OWNER_STATES={}                # owner-only multi-step management workflow
 OWNER_OVERRIDES_PATH=Path(__file__).with_name('owner_overrides.json')
 OWNER_LEARNING_PATH=Path(__file__).with_name('owner_learning.json')
+OWNER_CATALOG_PATH=Path(__file__).with_name('owner_catalog.json')
 DATA=json.loads(Path(__file__).with_name("products.json").read_text(encoding="utf-8"))
 
 # محصولات فایل CSV ووکامرس به کاتالوگ اصلی اضافه/به‌روزرسانی می‌شوند.
@@ -127,6 +128,7 @@ def _merge_csv_products(csv_products):
         else:
             merged.append(fresh)
     DATA[:] = merged
+    apply_owner_catalog()
     apply_owner_overrides()
     return len(csv_products)
 
@@ -359,21 +361,40 @@ def owner_json_write(path, value):
     tmp.write_text(json.dumps(value,ensure_ascii=False,indent=2),encoding='utf-8')
     tmp.replace(path)
 
+def owner_catalog():
+    data=owner_json_read(OWNER_CATALOG_PATH, {"added": [], "deleted_ids": []})
+    if not isinstance(data, dict): data={"added": [], "deleted_ids": []}
+    data.setdefault("added", []); data.setdefault("deleted_ids", [])
+    return data
+
+def apply_owner_catalog():
+    """Apply owner-added products and deletions after every CSV import."""
+    cfg=owner_catalog()
+    deleted={str(x) for x in cfg.get("deleted_ids", [])}
+    # Hide deleted items from every catalog-driven feature, including AI/search.
+    DATA[:] = [p for p in DATA if str(p.get("id", "")) not in deleted]
+    existing={str(p.get("id")) for p in DATA}
+    for p in cfg.get("added", []):
+        if isinstance(p, dict) and str(p.get("id")) not in deleted and str(p.get("id")) not in existing:
+            DATA.append(p); existing.add(str(p.get("id")))
+
+def persist_owner_product(product):
+    cfg=owner_catalog()
+    cfg["deleted_ids"]=[str(x) for x in cfg.get("deleted_ids", []) if str(x)!=str(product.get("id"))]
+    cfg["added"]=[p for p in cfg.get("added", []) if str(p.get("id"))!=str(product.get("id"))]
+    cfg["added"].append(product)
+    owner_json_write(OWNER_CATALOG_PATH,cfg)
+    apply_owner_catalog()
+    apply_owner_overrides()
+
 def apply_owner_overrides():
-    """Apply persistent owner edits, custom products and deletion tombstones."""
+    """Apply persistent owner edits after product/feed imports."""
     overrides=owner_json_read(OWNER_OVERRIDES_PATH,{})
     if not isinstance(overrides,dict): return
-    deleted={str(x) for x in overrides.get('_deleted_ids',[])}
-    custom=overrides.get('_custom_products',[])
-    known={str(p.get('id')) for p in DATA if isinstance(p,dict)}
-    for product in custom if isinstance(custom,list) else []:
-        if isinstance(product,dict) and str(product.get('id')) not in known:
-            DATA.append(product); known.add(str(product.get('id')))
-    DATA[:] = [p for p in DATA if str(p.get('id')) not in deleted]
     for item in DATA:
         ov=overrides.get(str(item.get('id')))
         if not isinstance(ov,dict): continue
-        for field in ('description','stock_file'):
+        for field in ('description','stock_file','image','name','category','product_url'):
             if field in ov: item[field]=ov[field]
         if 'price_raw' in ov:
             variants=item.get('variants') or []
@@ -386,7 +407,8 @@ def owner_panel_kb():
     return InlineKeyboardMarkup(inline_keyboard=[
         [btn('💰 تغییر قیمت محصول','owner:edit:price'),btn('📦 تغییر موجودی','owner:edit:stock')],
         [btn('📝 ویرایش بیوی محصول','owner:edit:description')],
-        [btn('➕ افزودن محصول جدید','owner:add'),btn('🗑 حذف محصول','owner:delete')],
+        [btn('🛠 ویرایش همه اطلاعات محصول','owner:edit:all')],
+        [btn('➕ افزودن محصول جدید','owner:add'),btn('➖ حذف محصول','owner:delete')],
         [btn('🧠 آموزش پاسخ به سؤال‌ها','owner:teach:faq')],
         [btn('🛍 آموزش پیشنهاد یک محصول','owner:teach:product')],
         [btn('🤖 آزمایش هوش مصنوعی','owner:testai')],
@@ -1397,6 +1419,66 @@ async def cb_owner_panel(c:CallbackQuery):
     await c.message.answer('👑 <b>پنل مدیریت لیانا</b>\nچه چیزی را می‌خواهی تغییر بدهی؟',reply_markup=owner_panel_kb())
     await c.answer()
 
+@dp.callback_query(F.data=='owner:add')
+async def cb_owner_add(c:CallbackQuery):
+    uid=c.from_user.id
+    if not owner_is_authenticated(uid):
+        await c.answer('دسترسی مدیریت ندارید.',show_alert=True); return
+    OWNER_STATES[uid]={"step":"add_name","product":{}}
+    await c.message.answer("➕ <b>افزودن محصول جدید</b>\n۱ از ۷: اسم کامل محصول را بفرست.")
+    await c.answer()
+
+@dp.callback_query(F.data=='owner:delete')
+async def cb_owner_delete(c:CallbackQuery):
+    uid=c.from_user.id
+    if not owner_is_authenticated(uid):
+        await c.answer('دسترسی مدیریت ندارید.',show_alert=True); return
+    OWNER_STATES[uid]={"step":"delete_search"}
+    await c.message.answer("➖ اسم محصولی را که می‌خواهی حذف کنی بفرست. محصول از کاتالوگ، دسته‌بندی‌ها، جست‌وجو و پیشنهادهای هوش مصنوعی کنار گذاشته می‌شود.")
+    await c.answer()
+
+@dp.callback_query(F.data.startswith('owner:deletepick:'))
+async def cb_owner_deletepick(c:CallbackQuery):
+    uid=c.from_user.id
+    if not owner_is_authenticated(uid):
+        await c.answer('دسترسی مدیریت ندارید.',show_alert=True); return
+    pid=c.data.split(':',2)[2]
+    product=find(pid)
+    if not product:
+        await c.answer('محصول پیدا نشد یا قبلاً حذف شده.',show_alert=True); return
+    OWNER_STATES[uid]={"step":"delete_confirm","product_id":str(pid)}
+    kb=InlineKeyboardMarkup(inline_keyboard=[
+        [btn('🗑 بله، حذف شود',f'owner:deleteconfirm:{pid}')],
+        [btn('لغو','owner:panel')]
+    ])
+    await c.message.answer('حذف این محصول تأیید می‌شود؟\n\n'+product_text(product),reply_markup=kb)
+    await c.answer()
+
+@dp.callback_query(F.data.startswith('owner:deleteconfirm:'))
+async def cb_owner_deleteconfirm(c:CallbackQuery):
+    uid=c.from_user.id
+    if not owner_is_authenticated(uid):
+        await c.answer('دسترسی مدیریت ندارید.',show_alert=True); return
+    pid=c.data.split(':',2)[2]
+    product=find(pid)
+    if not product:
+        await c.answer('این محصول قبلاً حذف شده است.',show_alert=True); return
+    cfg=owner_catalog()
+    cfg["deleted_ids"]=list(dict.fromkeys([str(x) for x in cfg.get("deleted_ids",[])] + [str(pid)]))
+    cfg["added"]=[p for p in cfg.get("added",[]) if str(p.get("id"))!=str(pid)]
+    owner_json_write(OWNER_CATALOG_PATH,cfg)
+    DATA[:]=[p for p in DATA if str(p.get("id"))!=str(pid)]
+    # Remove recommendation rules that point to a deleted product.
+    learned=owner_learning()
+    learned["rules"]=[r for r in learned.get("rules",[]) if str(r.get("product_id"))!=str(pid)]
+    owner_json_write(OWNER_LEARNING_PATH,learned)
+    overrides=owner_json_read(OWNER_OVERRIDES_PATH,{})
+    if isinstance(overrides,dict):
+        overrides.pop(str(pid),None); owner_json_write(OWNER_OVERRIDES_PATH,overrides)
+    OWNER_STATES.pop(uid,None)
+    await c.message.answer('✅ محصول «'+esc(product.get('name',''))+'» حذف شد و دیگر در جست‌وجو و پیشنهادهای هوش مصنوعی نمایش داده نمی‌شود.',reply_markup=owner_panel_kb())
+    await c.answer()
+
 @dp.callback_query(F.data.startswith('owner:edit:'))
 async def cb_owner_edit(c:CallbackQuery):
     uid=c.from_user.id
@@ -1406,6 +1488,31 @@ async def cb_owner_edit(c:CallbackQuery):
     labels={'price':'قیمت','stock':'موجودی','description':'بیوی محصول'}
     OWNER_STATES[uid]={'step':'product_search','field':field}
     await c.message.answer(f'🔎 اسم محصولی که می‌خواهی {labels.get(field,"اطلاعاتش")} را تغییر بدهی بفرست. می‌توانی بخشی از نام را هم بنویسی.')
+    await c.answer()
+
+@dp.callback_query(F.data.startswith('owner:editfield:'))
+async def cb_owner_editfield(c:CallbackQuery):
+    uid=c.from_user.id
+    if not owner_is_authenticated(uid):
+        await c.answer('دسترسی مدیریت ندارید.',show_alert=True); return
+    parts=c.data.split(':',3)
+    if len(parts)!=4:
+        await c.answer('درخواست نامعتبر است.',show_alert=True); return
+    _,_,pid,field=parts
+    product=find(pid)
+    if not product:
+        await c.answer('محصول پیدا نشد.',show_alert=True); return
+    OWNER_STATES[uid]={'step':'value','field':field,'product_id':str(pid)}
+    prompts={
+      'name':'نام جدید محصول را بفرست.',
+      'category':'دسته‌بندی جدید را بفرست.',
+      'price':'قیمت جدید را به تومان و با عدد بفرست.',
+      'stock':'وضعیت موجودی جدید را بفرست.',
+      'description':'توضیحات کامل جدید محصول را بفرست.',
+      'image':'لینک مستقیم عکس (https://...) را بفرست؛ برای پاک‌کردن عکس «ندارد» بنویس.',
+      'product_url':'لینک صفحه محصول را بفرست؛ برای پاک‌کردن لینک «ندارد» بنویس.'
+    }
+    await c.message.answer('🛠 ویرایش «'+esc(product.get('name',''))+'»\n'+prompts.get(field,'مقدار جدید را بفرست.'))
     await c.answer()
 
 @dp.callback_query(F.data.startswith('owner:pick:'))
@@ -1420,60 +1527,23 @@ async def cb_owner_pick(c:CallbackQuery):
     product=find(pid)
     if not product:
         await c.answer('محصول پیدا نشد.',show_alert=True); return
+    if field=='all':
+        kb=InlineKeyboardMarkup(inline_keyboard=[
+          [btn('✏️ نام محصول','owner:editfield:'+str(pid)+':name'),btn('🗂 دسته‌بندی','owner:editfield:'+str(pid)+':category')],
+          [btn('💰 قیمت','owner:editfield:'+str(pid)+':price'),btn('📦 موجودی','owner:editfield:'+str(pid)+':stock')],
+          [btn('📝 توضیحات','owner:editfield:'+str(pid)+':description')],
+          [btn('🖼 لینک عکس','owner:editfield:'+str(pid)+':image'),btn('🔗 لینک محصول','owner:editfield:'+str(pid)+':product_url')],
+          [btn('↩️ پنل مدیریت','owner:panel')]
+        ])
+        await c.message.answer('🛠 کدام اطلاعات «'+esc(product.get('name',''))+'» را می‌خواهی ویرایش کنی؟',reply_markup=kb)
+        await c.answer()
+        return
     OWNER_STATES[uid]={'step':'value','field':field,'product_id':str(pid)}
     prompts={
       'price':f'💰 قیمت جدید برای «{product.get("name","")}» را فقط به عدد تومان بفرست. این قیمت روی همه تنوع‌های این محصول اعمال می‌شود.',
       'stock':f'📦 وضعیت جدید موجودی «{product.get("name","")}» را بفرست؛ مثلاً «موجود»، «ناموجود» یا «برای استعلام تماس بگیرید».',
       'description':f'📝 بیوی جدید محصول «{product.get("name","")}» را کامل بفرست. همین متن جایگزین بیوی قبلی می‌شود.'}
     await c.message.answer(prompts.get(field,'مقدار جدید را بفرست.'))
-    await c.answer()
-
-@dp.callback_query(F.data=='owner:add')
-async def cb_owner_add(c:CallbackQuery):
-    uid=c.from_user.id
-    if not owner_is_authenticated(uid):
-        await c.answer('دسترسی مدیریت ندارید.',show_alert=True); return
-    OWNER_STATES[uid]={'step':'add_name','product':{}}
-    await c.message.answer('➕ افزودن محصول جدید\n۱ از ۶: اسم کامل محصول را بفرست.')
-    await c.answer()
-
-@dp.callback_query(F.data=='owner:delete')
-async def cb_owner_delete(c:CallbackQuery):
-    uid=c.from_user.id
-    if not owner_is_authenticated(uid):
-        await c.answer('دسترسی مدیریت ندارید.',show_alert=True); return
-    OWNER_STATES[uid]={'step':'delete_search'}
-    await c.message.answer('🗑 اسم محصولی را که می‌خواهی حذف کنی بفرست. بعد از انتخاب، تأیید حذف می‌گیرم.')
-    await c.answer()
-
-@dp.callback_query(F.data.startswith('owner:delpick:'))
-async def cb_owner_delpick(c:CallbackQuery):
-    uid=c.from_user.id
-    if not owner_is_authenticated(uid):
-        await c.answer('دسترسی مدیریت ندارید.',show_alert=True); return
-    pid=c.data.split(':',2)[2]; product=find(pid)
-    if not product:
-        await c.answer('محصول پیدا نشد.',show_alert=True); return
-    OWNER_STATES[uid]={'step':'delete_confirm','product_id':str(pid)}
-    kb=InlineKeyboardMarkup(inline_keyboard=[[btn('✅ بله، حذف شود',f'owner:delconfirm:{pid}')],[btn('❌ انصراف','owner:panel')]])
-    await c.message.answer('این محصول از فهرست، جست‌وجو، دسته‌بندی و پیشنهادهای هوش مصنوعی حذف می‌شود:\n<b>'+esc(product.get('name'))+'</b>\nمطمئنی؟',reply_markup=kb)
-    await c.answer()
-
-@dp.callback_query(F.data.startswith('owner:delconfirm:'))
-async def cb_owner_delconfirm(c:CallbackQuery):
-    uid=c.from_user.id
-    if not owner_is_authenticated(uid):
-        await c.answer('دسترسی مدیریت ندارید.',show_alert=True); return
-    pid=c.data.split(':',2)[2]
-    overrides=owner_json_read(OWNER_OVERRIDES_PATH,{})
-    if not isinstance(overrides,dict): overrides={}
-    deleted={str(x) for x in overrides.get('_deleted_ids',[])}; deleted.add(pid)
-    overrides['_deleted_ids']=sorted(deleted)
-    overrides['_custom_products']=[p for p in overrides.get('_custom_products',[]) if str(p.get('id'))!=pid]
-    owner_json_write(OWNER_OVERRIDES_PATH,overrides)
-    DATA[:]=[p for p in DATA if str(p.get('id'))!=pid]
-    OWNER_STATES.pop(uid,None)
-    await c.message.answer('✅ محصول حذف شد و در بخش‌های کاتالوگ، جست‌وجو، دسته‌بندی و پیشنهاد هوش مصنوعی نمایش داده نمی‌شود.',reply_markup=owner_panel_kb())
     await c.answer()
 
 @dp.callback_query(F.data=='owner:teach:faq')
@@ -1544,46 +1614,73 @@ async def text_search(m:Message):
         if step=='delete_search':
             matches=search_products(q,limit=12)
             if not matches:
-                await m.answer('محصولی پیدا نشد؛ اسم کوتاه‌تر یا دقیق‌تری بفرست.'); return
-            rows=[[btn('🗑 '+str(item.get('name','محصول'))[:42],f"owner:delpick:{item.get('id')}")] for item in matches[:12]]
+                await m.answer('محصولی پیدا نکردم؛ اسم یا بخشی از نامش را دوباره بفرست.')
+                return
+            rows=[[btn('🧴 '+str(item.get('name','محصول'))[:45],f"owner:deletepick:{item.get('id')}")] for item in matches[:12]]
             rows.append([btn('↩️ پنل مدیریت','owner:panel')])
-            await m.answer('محصول موردنظر را انتخاب کن:',reply_markup=InlineKeyboardMarkup(inline_keyboard=rows)); return
-        if step.startswith('add_'):
-            product=state.setdefault('product',{})
-            flow=[
-              ('add_name','name','اسم کامل محصول را بفرست.'),
-              ('add_category','category','دسته‌بندی محصول را بفرست؛ مثلاً آرایش چشم و ابرو.'),
-              ('add_price','price','قیمت به تومان را به عدد بفرست؛ اگر قیمت مشخص نیست «ندارد» بنویس.'),
-              ('add_stock','stock','وضعیت موجودی را بفرست؛ مثلاً موجود یا ناموجود.'),
-              ('add_variant','variant','تنوع/بسته‌بندی را بفرست؛ مثلاً ۲۴ عددی یا «ندارد».'),
-              ('add_description','description','توضیحات محصول را بفرست؛ اگر توضیحی نداری «ندارد» بنویس.')
-            ]
-            steps=[x[0] for x in flow]
-            current=step
-            idx=steps.index(current)
-            key=flow[idx][1]
-            product[key]=q
-            if idx < len(flow)-1:
-                OWNER_STATES[uid]={'step':flow[idx+1][0],'product':product}
-                await m.answer(f'✅ ثبت شد.\n{idx+2} از ۶: {flow[idx+1][2]}'); return
-            if product['name'].strip().lower() in ('ندارد','-'):
-                await m.answer('اسم محصول نمی‌تواند خالی باشد. دوباره از افزودن محصول شروع کن.',reply_markup=owner_panel_kb()); OWNER_STATES.pop(uid,None); return
-            pid='owner_'+hashlib.sha1((product['name']+str(time.time_ns())).encode()).hexdigest()[:12]
-            price=re.sub(r'[^0-9۰-۹٠-٩]','',product.get('price','')).translate(str.maketrans('۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩','01234567890123456789'))
-            variant=product.get('variant','ندارد')
-            variants=[]
-            if variant.strip().lower() not in ('ندارد','-',''):
-                variants.append({'id':pid,'name':product['name']+' - '+variant,'attribute':variant,'price_raw':price,'stock_file':product.get('stock','نامشخص')})
-            elif price:
-                variants.append({'id':pid,'name':product['name'],'attribute':'','price_raw':price,'stock_file':product.get('stock','نامشخص')})
-            new_product={'id':pid,'sku':pid,'name':product['name'],'category':product.get('category') or _guess_category(product['name']),'description':'' if product.get('description','').strip().lower() in ('ندارد','-') else product.get('description',''),'image':'','published':True,'stock_file':product.get('stock') or 'نامشخص','variants':variants,'product_url':SHOP_URL.rstrip('/')+'/?s='+quote(product['name'])+'&post_type=product','owner_added':True}
-            overrides=owner_json_read(OWNER_OVERRIDES_PATH,{})
-            if not isinstance(overrides,dict): overrides={}
-            custom=overrides.setdefault('_custom_products',[])
-            custom.append(new_product); overrides['_deleted_ids']=[x for x in overrides.get('_deleted_ids',[]) if str(x)!=pid]
-            owner_json_write(OWNER_OVERRIDES_PATH,overrides)
-            DATA.append(new_product); OWNER_STATES.pop(uid,None)
-            await m.answer('✅ محصول اضافه شد! از حالا در جست‌وجو، دسته‌بندی‌ها و پیشنهادهای هوش مصنوعی قابل استفاده است.\n\n'+product_text(new_product),reply_markup=owner_panel_kb()); return
+            await m.answer('کدام محصول را حذف کنم؟ برای جلوگیری از حذف اشتباه، در مرحله بعد تأیید می‌گیریم.',reply_markup=InlineKeyboardMarkup(inline_keyboard=rows))
+            return
+        if step and step.startswith('add_'):
+            prod=state.setdefault('product',{})
+            if step=='add_name':
+                if len(q)<2 or len(q)>180:
+                    await m.answer('اسم محصول را بین ۲ تا ۱۸۰ نویسه بفرست.'); return
+                if any(normalize_fa(p.get('name',''))==normalize_fa(q) for p in DATA):
+                    await m.answer('محصولی با این نام از قبل وجود دارد. نام دقیق‌تر یا محصول دیگری بفرست.'); return
+                prod['name']=q; state['step']='add_category'
+                await m.answer('۲ از ۷: دسته‌بندی محصول را بفرست؛ مثلاً آرایش چشم و ابرو یا مراقبت پوست.')
+                return
+            if step=='add_category':
+                prod['category']=q[:100]; state['step']='add_price'
+                await m.answer('۳ از ۷: قیمت را به تومان و فقط با عدد بفرست. اگر قیمت هنوز مشخص نیست، بنویس «نامشخص».')
+                return
+            if step=='add_price':
+                digits=re.sub(r'[^0-9۰-۹٠-٩]','',q).translate(str.maketrans('۰۱۲۳۴۵۶۷۸۹٠١٢٣٤٥٦٧٨٩','01234567890123456789'))
+                if not digits and normalize_fa(q) not in ('نامشخص','بعدا','بعدا مشخص می شود'):
+                    await m.answer('قیمت را عددی به تومان بفرست یا بنویس «نامشخص».'); return
+                prod['price_raw']=str(int(digits)) if digits else ''
+                state['step']='add_stock'
+                await m.answer('۴ از ۷: وضعیت موجودی را بفرست؛ مثلاً موجود، ناموجود یا برای استعلام.')
+                return
+            if step=='add_stock':
+                prod['stock_file']=q[:120]; state['step']='add_package'
+                await m.answer('۵ از ۷: نوع بسته‌بندی/تعداد را بفرست؛ مثلاً ۱۲ عددی، ۲۴ عددی یا «ندارد».')
+                return
+            if step=='add_package':
+                prod['package']='' if normalize_fa(q) in ('ندارد','خیر','نه') else q[:180]
+                state['step']='add_description'
+                await m.answer('۶ از ۷: توضیحات محصول را بفرست. اگر توضیح نداری بنویس «خودکار» تا معرفی عمومی و محتاطانه ساخته شود.')
+                return
+            if step=='add_description':
+                if normalize_fa(q) in ('خودکار','ندارم','ندارد'):
+                    prod['description']=''
+                else: prod['description']=q[:3000]
+                state['step']='add_url'
+                await m.answer('۷ از ۸: لینک صفحه محصول را بفرست؛ اگر فعلاً لینک نداری بنویس «ندارد».')
+                return
+            if step=='add_url':
+                url='' if normalize_fa(q) in ('ندارد','ندارم','خیر','نه') else q.strip()
+                if url and not url.startswith(('https://','http://')):
+                    await m.answer('لینک باید با https:// یا http:// شروع شود؛ یا بنویس «ندارد».'); return
+                prod['product_url']=url or (SHOP_URL.rstrip('/')+'/?s='+quote(prod['name'])+'&post_type=product')
+                state['step']='add_image'
+                await m.answer('۸ از ۸: لینک مستقیم عکس محصول را بفرست (ترجیحاً JPG یا PNG و با https://). اگر عکس نداری بنویس «ندارد».')
+                return
+            if step=='add_image':
+                image_url='' if normalize_fa(q) in ('ندارد','ندارم','خیر','نه') else q.strip()
+                if image_url and not image_url.startswith(('https://','http://')):
+                    await m.answer('لینک عکس باید با https:// یا http:// شروع شود؛ یا بنویس «ندارد».'); return
+                pid='owner_'+hashlib.sha256((prod['name']+str(time.time_ns())).encode()).hexdigest()[:14]
+                category=prod.get('category') or _guess_category(prod['name'])
+                desc=prod.get('description') or describe_product({'name':prod['name'],'category':category,'variants':[]})
+                variants=[]
+                if prod.get('price_raw') or prod.get('package'):
+                    variants=[{'id':pid,'name':prod['name'],'attribute':prod.get('package',''),'price_raw':prod.get('price_raw',''),'stock_file':prod.get('stock_file','نامشخص')}]
+                newp={'id':pid,'sku':pid,'name':prod['name'],'category':category,'description':desc,'image':image_url,'published':True,'stock_file':prod.get('stock_file','نامشخص'),'variants':variants,'product_url':prod['product_url'],'owner_added':True}
+                persist_owner_product(newp)
+                OWNER_STATES.pop(uid,None)
+                await m.answer('✅ محصول با موفقیت اضافه شد!\nاز همین حالا در فهرست محصولات، دسته‌بندی، جست‌وجو و زمینه پیشنهادهای هوش مصنوعی قابل استفاده است. هوش مصنوعی بر اساس نام، دسته، بسته‌بندی و توضیحات آن را پیدا می‌کند؛ برای اطلاعات دقیق‌تر، توضیحات واقعی محصول را وارد کن.\n\n'+product_text(newp),reply_markup=owner_panel_kb())
+                return
         if step=='product_search':
             field=state.get('field','price')
             matches=search_products(q,limit=12)
@@ -1619,7 +1716,18 @@ async def text_search(m:Message):
                 if len(q)<5:
                     await m.answer('بیو کمی کوتاه است؛ متن کامل‌تری بفرست یا حداقل ۵ نویسه وارد کن.'); return
                 ov['description']=q[:3000]
-                reply='بیوی جدید ذخیره شد و در کارت محصول و زمینه پاسخ‌گویی هوش مصنوعی استفاده می‌شود. 📝'
+                reply='توضیحات جدید ذخیره شد. 📝'
+            elif field in ('name','category'):
+                if len(q)<2 or len(q)>180:
+                    await m.answer('مقدار را بین ۲ تا ۱۸۰ نویسه بفرست.'); return
+                ov[field]=q[:180]
+                reply=('نام محصول' if field=='name' else 'دسته‌بندی')+' به‌روزرسانی شد.'
+            elif field in ('image','product_url'):
+                val='' if normalize_fa(q) in ('ندارد','ندارم','خیر','نه','پاک کن') else q.strip()
+                if val and not val.startswith(('https://','http://')):
+                    await m.answer('لینک باید با https:// یا http:// شروع شود؛ یا برای پاک‌کردن بنویس «ندارد».'); return
+                ov[field]=val
+                reply=('عکس محصول' if field=='image' else 'لینک صفحه محصول')+' به‌روزرسانی شد.'
             else:
                 await m.answer('نوع ویرایش مشخص نیست.'); return
             owner_json_write(OWNER_OVERRIDES_PATH,overrides)
@@ -1828,6 +1936,8 @@ async def cb_ask(c:CallbackQuery):
     await c.message.answer(text,reply_markup=kb); await c.answer()
 
 async def main():
+    apply_owner_catalog()
+    apply_owner_overrides()
     init_db()
     if not isinstance(DATA, list):
         raise SystemExit('products.json باید فهرستی از محصولات باشد.')
