@@ -17,6 +17,10 @@ PHONE_2=os.getenv("PHONE_2", "09904358418").strip()
 SHOP_URL=os.getenv("SHOP_URL", "https://liyanashop.ir").strip()
 TG_URL=os.getenv("TELEGRAM_URL", "https://t.me/liyanashop_ir").strip()
 RUBIKA_URL=os.getenv("RUBIKA_URL", "https://rubika.ir/liyanashop_gnv").strip()
+OPENROUTER_API_KEY=os.getenv("OPENROUTER_API_KEY", "").strip()
+OPENROUTER_MODEL=os.getenv("OPENROUTER_MODEL", "meta-llama/llama-3.3-70b-instruct:free").strip()
+OPENROUTER_SITE_URL=os.getenv("OPENROUTER_SITE_URL", "https://liyanashop.ir").strip()
+OPENROUTER_APP_NAME=os.getenv("OPENROUTER_APP_NAME", "Liyana Shop Telegram Bot").strip()
 GEMINI_API_KEY=os.getenv("GEMINI_API_KEY", os.getenv("GOOGLE_API_KEY", "")).strip()
 GEMINI_MODEL=os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
 GROQ_API_KEY=os.getenv("GROQ_API_KEY", "").strip()
@@ -1523,7 +1527,7 @@ async def call_groq_with_web_search(user_text:str, history=None, user_id=None):
     history=history or []
     if not GROQ_API_KEY:
         print('AI config error: neither GEMINI_API_KEY/GOOGLE_API_KEY nor GROQ_API_KEY is configured')
-        return '🌷 دستیار هوشمند تنظیم نشده است. در FadeHost متغیر GEMINI_API_KEY (برای جست‌وجوی گوگل) یا GROQ_API_KEY را بررسی کن.'
+        return '🌷 دستیار هوشمند تنظیم نشده است. در FadeHost متغیر OPENROUTER_API_KEY را در تنظیمات هاست بررسی کن.'
     results=await _duckduckgo_web_search(user_text,5)
     web_context=''
     if results:
@@ -1563,6 +1567,117 @@ async def call_groq_with_web_search(user_text:str, history=None, user_id=None):
     except Exception as exc:
         print(f'Groq request failed: {type(exc).__name__}: {exc}')
         return '🌷 ارتباط با سرویس هوش مصنوعی برقرار نشد. جزئیات خطا در Logs ثبت شد.'
+
+
+
+async def call_openrouter(user_text:str, history=None, user_id=None):
+    """Primary AI provider: OpenRouter's OpenAI-compatible chat completions API."""
+    history = history or []
+    interpreted_text = contextual_query(user_text, history)
+    qn = normalize_fa(interpreted_text)
+
+    identity_phrases = ('کی هستی', 'تو کی هستی', 'خودت کی هستی', 'معرفی خودت', 'اسمت چیه', 'تو چی هستی')
+    if any(normalize_fa(x) in qn for x in identity_phrases):
+        return '🤖 من دستیار هوش مصنوعی لیانا شاپ هستم؛ می‌تونم درباره موضوعات عمومی، فناوری، برنامه‌نویسی، برندها و محصولات کمکت کنم. 🌐🌷'
+
+    store_fact_terms = (
+        'آدرس فروشگاه','شماره تماس','شماره فروشگاه','ساعت کاری','شعبه','پارکینگ ملت',
+        'پاساژ جام جم','ارسال دارید','ارسال کالا','روش ارسال','چطور سفارش','نحوه سفارش',
+        'اطلاعات فروشگاه','درباره فروشگاه','معرفی فروشگاه','خرید حضوری','خرید اینترنتی'
+    )
+    if any(normalize_fa(term) in qn for term in store_fact_terms):
+        return offline_answer(interpreted_text, history=history)
+
+    research_terms = (
+        'شرکت','برند','کمپانی','سازنده','تولید کننده','تولیدکننده','کشور سازنده',
+        'ساخت کجاست','ساخت کدام کشور','اصالت','اصل یا فیک','تقلبی','ترکیبات',
+        'مواد تشکیل دهنده','نظرات','بررسی','ریویو','ترند','جدیدترین','معروف ترین',
+        'اطلاعات درباره','درباره برند','کیفیت برند','تاریخچه','وب سایت رسمی'
+    )
+    wants_web = any(normalize_fa(term) in qn for term in research_terms) or any(
+        term in qn for term in ('لیانا شاپ','لیاناشاپ','liana shop','liyanashop')
+    )
+    if not wants_web:
+        catalog_answer = catalog_request_reply(interpreted_text)
+        if catalog_answer is not None:
+            return catalog_answer
+
+    if not OPENROUTER_API_KEY:
+        print('OpenRouter config error: OPENROUTER_API_KEY is missing')
+        return '🌷 کلید OpenRouter تنظیم نشده است. در تنظیمات متغیرهای هاست، OPENROUTER_API_KEY را اضافه کن.'
+
+    web_results = await _duckduckgo_web_search(interpreted_text, 5)
+    web_context = ''
+    if web_results:
+        web_context = '\\n\\nنتایج جست‌وجوی وب (برای اطلاعات تازه؛ اعتبار نتایج را ارزیابی کن):\\n' + '\\n'.join(
+            f"{i+1}. {item.get('title','')}\\n{item.get('snippet','')}\\nURL: {item.get('url','')}"
+            for i, item in enumerate(web_results)
+        )
+
+    remembered_facts = []
+    try:
+        if user_id is not None:
+            remembered_facts = memory_get(user_id)
+    except Exception:
+        pass
+    memory_block = ('\\nترجیحات قبلی غیرحساس کاربر در صورت مرتبط بودن: ' + ' | '.join(remembered_facts)) if remembered_facts else ''
+
+    system_prompt = (
+        'تو دستیار هوش مصنوعی عمومی فارسی‌زبان، دقیق و خوش‌برخورد هستی و در موضوعات مرتبط نماینده لیانا شاپ هم هستی. '
+        'به سؤال‌های مجاز درباره موضوعات عمومی، علم، فناوری، برنامه‌نویسی، تاریخ، زبان، فرهنگ، برندها، شرکت‌ها، اخبار، آرایش و محصولات پاسخ بده؛ خودت را به آرایش محدود نکن. '
+        'فارسی روان و مستقیم بنویس و هر پیام را بی‌دلیل با سلام شروع نکن. '
+        'برای اطلاعات روز از نتایج وبِ ارائه‌شده استفاده کن؛ اگر نتیجه کافی نیست، صادقانه بگو و هرگز منبع یا لینک جعل نکن. '
+        'برای قیمت و موجودی فروشگاه، فقط به داده واقعی کاتالوگ تکیه کن و از اینترنت موجودی را حدس نزن. '
+        'اطلاعات حساس، رمزها و کلیدهای API را درخواست یا بازگو نکن. برای موضوعات پزشکی، حقوقی یا مالی محتاط باش.'
+        + memory_block
+    )
+    messages = [{'role':'system','content':system_prompt}]
+    for item in history[-10:]:
+        role = item.get('role','user')
+        content = str(item.get('content','')).strip()
+        if role in ('assistant','user') and content:
+            messages.append({'role':role,'content':content[:3000]})
+    messages.append({'role':'user','content':interpreted_text + web_context})
+
+    timeout = aiohttp.ClientTimeout(total=60, connect=15, sock_read=50)
+    headers = {
+        'Authorization': f'Bearer {OPENROUTER_API_KEY}',
+        'Content-Type': 'application/json',
+        'HTTP-Referer': OPENROUTER_SITE_URL,
+        'X-Title': OPENROUTER_APP_NAME,
+    }
+    payload = {
+        'model': OPENROUTER_MODEL,
+        'messages': messages,
+        'temperature': 0.4,
+        'max_tokens': 1200,
+    }
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(
+                'https://openrouter.ai/api/v1/chat/completions',
+                headers=headers, json=payload
+            ) as response:
+                body = await response.json(content_type=None)
+                if response.status != 200:
+                    print(f'OpenRouter API error HTTP {response.status}: {str(body)[:1200]}')
+                    return '🌷 سرویس هوش مصنوعی خطا داد. در Logs جزئیات ثبت شده؛ کلید، اعتبار حساب و نام مدل OpenRouter را بررسی کن.'
+                choices = body.get('choices') or []
+                answer = str(((choices[0].get('message') or {}).get('content')) or '').strip() if choices else ''
+                if not answer:
+                    print(f'OpenRouter returned no answer: {str(body)[:800]}')
+                    return '🌷 سرویس هوش مصنوعی پاسخ متنی برنگرداند. جزئیات در Logs ثبت شد.'
+                if web_results:
+                    answer += '\\n\\n🔎 منابع وب برای بررسی بیشتر:\\n' + '\\n'.join(
+                        f"• {item.get('title','منبع وب')} — {item.get('url','')}" for item in web_results[:5]
+                    )
+                return answer
+    except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+        print(f'OpenRouter connection failed: {type(exc).__name__}: {exc}')
+        return '🌷 اتصال به OpenRouter برقرار نشد. اینترنت هاست و جزئیات Logs را بررسی کن.'
+    except Exception as exc:
+        print(f'Unexpected OpenRouter error: {type(exc).__name__}: {exc}')
+        return '🌷 هنگام دریافت پاسخ خطایی رخ داد. جزئیات در Logs ثبت شد.'
 
 
 async def call_gemini(user_text:str, history=None, user_id=None):
@@ -2099,7 +2214,7 @@ async def text_search(m:Message):
         interpreted=contextual_query(q,history)
         # Let greetings, casual conversation, store questions and recommendation requests reach intent handling.
         memory_update_from_user(uid, q)
-        answer=await call_gemini(q,history=history,user_id=uid)
+        answer=await call_openrouter(q,history=history,user_id=uid)
         history_add(uid,'user',q)
         history_add(uid,'assistant',answer)
         # Use the pre-turn history when deriving product buttons so a short answer
