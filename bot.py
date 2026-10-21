@@ -545,7 +545,12 @@ def fuzzy_catalog_products(query:str, limit=8):
         'خشکی':['آبرسان','مرطوب کننده','کرم دست'],
         'جوش':['ضد جوش','شوینده','سرم'],
         'ناخن':['لاک','ناخن مصنوعی','ناخن گیر'],
-        'مو':['شامپو','ماسک مو','سرم مو']
+        'مو':['شامپو','کرم مو','ماسک مو','سرم مو','روغن مو','نرم کننده مو'],
+        'پیلاف':['رژ استخری','پیلاف لب','پیل آف لب','رژ پیل آف'],
+        'استخری':['رژ استخری','پیلاف لب','پیل آف لب'],
+        'کرم مو':['کرم مو','کرم حالت دهنده مو'],
+        'بدن':['بادی اسپلش','لوسیون بدن','شاور ژل','نمک بدن','اسکراب بدن'],
+        'تعریق':['مام و دئودورانت','ضد تعریق']
     }
     expanded=list(q_tokens)
     for token in q_tokens:
@@ -948,6 +953,8 @@ PRODUCT_INTENTS = [
     ('تینت', ('تینت','تینت لب','تینت گونه')),
     ('خط لب', ('خط لب','مداد لب')),
     ('بالم لب', ('بالم لب','مرطوب کننده لب')),
+    # Peel-off lip stains are commonly called «پیلاف لب» or «رژ استخری» in Persian shops.
+    ('رژ استخری', ('رژ استخری','پیلاف لب','پیل آف لب','پیل‌آف لب','رژ پیل آف','رژ پیلاف','تینت پیل آف','peel off lip stain','peel-off lip stain','lip tattoo')),
     ('رژگونه', ('رژگونه','رژ گونه','بلشر')),
     ('ریمل', ('ریمل','mascara')),
     ('خط چشم', ('خط چشم','خطچشم','eyeliner')),
@@ -962,7 +969,19 @@ PRODUCT_INTENTS = [
     ('شوینده', ('شوینده','فیس واش','فیسواش','ژل شستشو','فوم شستشو','پاک کننده صورت')),
     ('ضد جوش', ('ضد جوش','آکنه','جوش صورت','سرم جوش')),
     ('نمک بدن', ('نمک بدن','اسکراب بدن')),
+    ('کرم مو', ('کرم مو','کرم موی سر','کرم حالت دهنده مو','کرم مو بعد حمام','hair cream','کرم موشکی')),
+    ('ماسک مو', ('ماسک مو','ماسک موی سر','hair mask')),
+    ('نرم کننده مو', ('نرم کننده مو','نرم‌کننده مو','کاندیشنر','conditioner')),
+    ('روغن مو', ('روغن مو','روغن موی سر','hair oil')),
+    ('اسپری مو', ('اسپری مو','اسپری حالت دهنده مو','hair spray')),
+    ('ژل مو', ('ژل مو','ژل حالت دهنده مو','hair gel')),
     ('شامپو', ('شامپو','مراقبت مو','ماسک مو','سرم مو')),
+    ('لوسیون بدن', ('لوسیون بدن','کرم بدن','بادی لوشن','body lotion')),
+    ('شاور ژل', ('شاور ژل','ژل شستشوی بدن','شامپو بدن','body wash','shower gel')),
+    ('مام و دئودورانت', ('مام','مام رول','دئودورانت','ضد تعریق','اسپری ضد تعریق','deodorant','antiperspirant')),
+    ('کرم دست', ('کرم دست','مرطوب کننده دست','hand cream')),
+    ('کرم پا', ('کرم پا','ترک پا','foot cream')),
+    ('اسکراب بدن', ('اسکراب بدن','لایه بردار بدن','body scrub')),
     ('عطر', ('عطر','ادکلن','eau de parfum')),
     ('لاک ناخن', ('لاک ناخن','لاک','ناخن مصنوعی','ناخن بچه گانه')),
     ('براش', ('براش','قلم مو آرایشی','ست براش')),
@@ -1000,7 +1019,16 @@ def intent_products(query, limit=8):
         return out
     per_family=max(2, min(20, limit//max(1,len(families))))
     for family, markers in families:
-        candidates=search_products(family,20)
+        # Search the canonical family AND its aliases. Catalog names often use a
+        # shop-specific term (e.g. «رژ استخری») instead of the customer's wording.
+        candidates=[]
+        candidate_ids=set()
+        for search_term in (family, *markers):
+            for candidate in search_products(search_term, 20):
+                candidate_id=str(candidate.get('id',''))
+                if candidate_id not in candidate_ids:
+                    candidates.append(candidate)
+                    candidate_ids.add(candidate_id)
         strict=[]
         normalized_markers=[normalize_fa(x) for x in markers]
         for p in candidates:
@@ -1314,7 +1342,9 @@ def offline_answer(user_text:str, history=None)->str:
       'تینت': ('تینت',), 'کانسیلر': ('کانسیلر',), 'پنکیک': ('پنکیک',),
       'رژ لب': ('رژ لب','رژلب','رژ مایع','رژ جامد'), 'رژگونه': ('رژگونه','رژ گونه'),
       'ریمل': ('ریمل',), 'عطر': ('عطر','ادکلن'), 'نمک بدن': ('نمک بدن',),
-      'آبرسان': ('آبرسان','مرطوب کننده','هیالورونیک'), 'کرم پودر': ('کرم پودر','کرمپودر','فوندیشن')
+      'آبرسان': ('آبرسان','مرطوب کننده','هیالورونیک'), 'کرم پودر': ('کرم پودر','کرمپودر','فوندیشن'),
+      'کرم مو': ('کرم مو','کرم موی سر','کرم حالت دهنده مو','کرم موشکی'),
+      'رژ استخری': ('رژ استخری','پیلاف لب','پیل آف لب','رژ پیل آف','رژ پیلاف')
     }
     product_request = any(x in q for x in ('می خواهم','میخوام','می خواستم','میخاستم','دنبال','پیدا کن','پیشنهاد بده','معرفی کن','دارید','دارین','می خوام'))
     requested_family = None
@@ -1679,6 +1709,31 @@ async def call_openrouter(user_text: str, history=None, user_id=None):
     if any(normalize_fa(x) in qn for x in identity_phrases):
         return '🤖 من دستیار هوشمند لیانا شاپ هستم؛ برای انتخاب محصول کمکت می‌کنم و درباره سؤال‌های دیگه هم تا جایی که بتونم پاسخ می‌دم. 🌷'
 
+    # Explain the local term «پیلاف لب / رژ استخری» and search the real catalog.
+    # The generic explanation is safe even when this exact product is not stocked.
+    peel_terms = ('پیلاف لب', 'پیل آف لب', 'پیل اف لب', 'رژ استخری', 'رژ پیلاف', 'رژ پیل آف', 'تینت پیل آف')
+    if any(normalize_fa(term) in qn for term in peel_terms):
+        peel_matches = intent_products(interpreted_text, limit=6)
+        # Search all common names because catalog naming may differ from customer slang.
+        seen_peel = {str(x.get('id','')) for x in peel_matches}
+        for term in ('رژ استخری', 'پیلاف لب', 'پیل آف لب', 'رژ پیل آف', 'تینت پیل آف'):
+            for item in search_products(term, 12):
+                pid = str(item.get('id',''))
+                name_norm = normalize_fa(item.get('name',''))
+                if pid not in seen_peel and any(normalize_fa(t) in name_norm for t in peel_terms + ('تینت لب','رژ لب')):
+                    peel_matches.append(item); seen_peel.add(pid)
+        if any(x in qn for x in ('چیست','چیه','یعنی چی','چه نوع','چه مدلی')):
+            explanation = ('پیلاف لب که بهش «رژ استخری» هم می‌گن، معمولاً نوعی رنگ لبِ پیل‌آف است: محصول را طبق دستور روی لب می‌زنند، می‌گذارند خشک شود و لایه‌اش را جدا می‌کنند؛ رنگ روی لب باقی می‌ماند. '
+                           'فرمول و ماندگاری بین برندها فرق می‌کند، پس دستور بسته‌بندی را رعایت کن و روی لب ترک‌خورده یا تحریک‌شده استفاده نکن. ')
+        else:
+            explanation = ('آره، منظورت پیلاف لب یا همون رژ استخریه؛ معمولاً رنگ لبِ پیل‌آف است که بعد از خشک‌شدن لایه‌اش جدا می‌شود و رنگ روی لب می‌ماند. 🌷 ')
+        if peel_matches:
+            explanation += '\n\nاین گزینه‌ها را با نام واقعی‌شان در محصولات لیانا پیدا کردم:\n' + '\n'.join('• '+str(x.get('name','محصول')) for x in peel_matches[:5])
+            explanation += '\n\nبرای قیمت و موجودی نهایی، جزئیات محصول را بررسی کن.'
+        else:
+            explanation += '\n\nفعلاً محصولی با نام قابل‌تأیید در این گروه از کاتالوگ پیدا نکردم؛ ممکن است با نام دیگری ثبت شده باشد. اگر عکس یا نام برندش را بفرستی، دقیق‌تر جست‌وجو می‌کنم.'
+        return explanation
+
     # 3) Shop facts and owner-taught answers should come from configured shop data.
     store_fact_terms = (
         'آدرس فروشگاه', 'شماره تماس', 'شماره فروشگاه', 'ساعت کاری', 'شعبه', 'پارکینگ ملت',
@@ -1837,7 +1892,10 @@ async def call_openrouter(user_text: str, history=None, user_id=None):
                 answer = str(((choices[0].get('message') or {}).get('content')) or '').strip() if choices else ''
                 if not answer:
                     print(f'OpenRouter returned no answer: {str(body)[:600]}')
-                    return '🌷 این بار پاسخ دریافت نشد؛ لطفاً دوباره امتحان کن.'
+                    fallback = await _fallback_ai_provider(interpreted_text, history=history, user_id=user_id)
+                    if fallback:
+                        return fallback
+                    return '🌷 این بار از سرویس هوش مصنوعی پاسخ متنی دریافت نشد. لطفاً کمی بعد دوباره امتحان کن.'
                 answer = answer.replace('\\n', '\n').replace('\r\n', '\n')
                 # Strip common Markdown artifacts because Telegram is configured for HTML parse mode.
                 answer = re.sub(r'\*\*(.*?)\*\*', r'\1', answer)
