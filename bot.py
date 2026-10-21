@@ -1420,7 +1420,7 @@ def catalog_request_reply(query:str, limit:int=5):
         requested = '، '.join(family for family, _ in families)
         return (
             '🌷 ممنون که گفتی دنبال چی هستی! فعلاً محصولی با تطابق کافی برای '
-            f'«{requested}» در فهرست محصولات لیانا پیدا نکردم. 💗\\n\\n'
+            f'«{requested}» در فهرست محصولات لیانا پیدا نکردم. 💗\n\n'
             'نمی‌خوام محصول نامرتبطی بهت پیشنهاد بدم؛ اگر مدل، برند یا اسم دیگری مدنظرت هست '
             'برام بنویس تا دوباره دقیق‌تر جست‌وجو کنم.'
         )
@@ -1443,7 +1443,7 @@ def catalog_request_reply(query:str, limit:int=5):
             out.append(description[:280])
         out.append('')
     out.append('💗 اگر منظورت برند، رنگ یا بسته‌بندی مشخصیه، بگو تا بین همین محصولات دقیق‌تر برات پیدا کنم.')
-    return '\\n'.join(out).strip()
+    return '\n'.join(out).strip()
 
 
 async def call_gemini(user_text:str, history=None):
@@ -1454,23 +1454,51 @@ async def call_gemini(user_text:str, history=None):
     identity_phrases = ('کی هستی', 'تو کی هستی', 'خودت کی هستی', 'معرفی خودت', 'اسمت چیه', 'تو چی هستی')
     if any(normalize_fa(phrase) in normalized for phrase in identity_phrases):
         return '🤖 من دستیار هوش مصنوعی لیانا شاپ هستم؛ اینجام تا درباره محصولات آرایشی و بهداشتی، مراقبت پوست و مو و پیدا کردن محصولات مناسب راهنمایی‌ات کنم. 🌷'
-    catalog_answer = catalog_request_reply(interpreted_text)
-    if catalog_answer is not None:
-        return catalog_answer
-    if not is_cosmetics_only_question(interpreted_text, history=history):
+    qn = normalize_fa(interpreted_text)
+    # Store facts already configured by the shop owner should be answered from
+    # the local, known information rather than guessed by the language model.
+    store_fact_terms = (
+        'آدرس فروشگاه','شماره تماس','شماره فروشگاه','ساعت کاری','شعبه','پارکینگ ملت',
+        'پاساژ جام جم','ارسال دارید','ارسال کالا','روش ارسال','چطور سفارش','نحوه سفارش',
+        'اطلاعات فروشگاه','درباره فروشگاه','معرفی فروشگاه','خرید حضوری','خرید اینترنتی'
+    )
+    if any(normalize_fa(term) in qn for term in store_fact_terms):
+        return offline_answer(interpreted_text, history=history)
+
+    # Questions about a brand/company or a product's background should use web
+    # research instead of being mistaken for a request to list catalog products.
+    research_terms = (
+        'شرکت','برند','کمپانی','سازنده','تولید کننده','تولیدکننده','کشور سازنده',
+        'ساخت کجاست','ساخت کدام کشور','اصالت','اصل یا فیک','تقلبی','ترکیبات',
+        'مواد تشکیل دهنده','نظرات','بررسی','ریویو','ترند','جدیدترین','معروف ترین',
+        'اطلاعات درباره','درباره برند','کیفیت برند','تاریخچه','وب سایت رسمی'
+    )
+    wants_web_research = any(normalize_fa(term) in qn for term in research_terms) or any(
+        term in qn for term in ('لیانا شاپ','لیاناشاپ','liana shop','liyanashop')
+    )
+    if not wants_web_research:
+        catalog_answer = catalog_request_reply(interpreted_text)
+        if catalog_answer is not None:
+            return catalog_answer
+    beauty_brand_terms = ('ویولت','شیگلم','xixi','ایکس ایکس آی','ارت اسکین','آرت اسکین','جولیوم','کماس','کالیستا','مای','فلورمار','گلدن رز','نوت','لورال','مک','میبلین','اسنس','رولوشن','روماند','گابرینی','بیول','لافارر','سینره','درماتیپیک')
+    brand_context = wants_web_research and any(normalize_fa(term) in qn for term in beauty_brand_terms)
+    if not is_cosmetics_only_question(interpreted_text, history=history) and not brand_context:
         return '🌷 من در این بخش فقط درباره آرایش، محصولات آرایشی و بهداشتی و مراقبت پوست و مو راهنمایی می‌کنم. لطفاً سؤالت رو در همین زمینه بپرس 💄🧴'
     if not GEMINI_API_KEY:
         return '🌷 دستیار هوشمند فعلاً در دسترس نیست. لطفاً کمی بعد دوباره امتحان کن.'
     system_prompt=(
-      'تو یک مشاور خوش‌برخورد و آگاه در زمینه آرایش، محصولات آرایشی و بهداشتی و مراقبت پوست و مو هستی. '
-      'فقط به فارسی طبیعی پاسخ بده و فقط درباره همین موضوع‌ها راهنمایی کن. '
-      'برای معرفی محصولی که در کاتالوگ لیانا جست‌وجو نشده، نام محصول یا موجودی و قیمت قطعی جعل نکن. '
-      'قیمت و موجودی لحظه‌ای را فقط وقتی داده‌ای صریح در اختیار داری اعلام کن؛ در غیر این صورت پیشنهاد استعلام از فروشگاه بده. '
-      'درباره ویژگی‌های خاص یک محصول، ترکیبات، رنگ‌ها، حجم، SPF یا ادعای درمانی اگر مطمئن نیستی حدس نزن و صریح بگو اطلاعات کافی نداری. '
-      'برای انتخاب محصول، نیاز و نوع پوست/مو، بودجه و ترجیحات کاربر را در نظر بگیر؛ اگر اطلاعات کافی نیست یک سؤال کوتاه بپرس. '
+      'تو دستیار هوشمند و مشاور خوش‌برخورد لیانا شاپ در زمینه آرایش، محصولات آرایشی و بهداشتی و مراقبت پوست و مو هستی. '
+      'همیشه فارسی روان، خوش‌خوان، کامل و کاربردی بنویس؛ لحن گرم و صمیمی داشته باش و گاهی متناسب با فضا از «عزیزم»، «جانم» یا «حتماً گلم» استفاده کن، اما در هر پیام زیاده‌روی نکن. '
+      'از ۲ تا ۵ ایموجی مرتبط و زیبا در جای مناسب استفاده کن و متن را با تیتر یا فهرست کوتاه مرتب کن؛ ایموجی‌ها جای اطلاعات واقعی را نگیرند. '
+      'فقط به موضوعات آرایش، زیبایی، مراقبت پوست و مو، برندهای آرایشی، محصولات آرایشی و اطلاعات فروشگاه لیانا شاپ پاسخ محتوایی بده. '
+      'قانون بسیار مهم: هرگز نام محصول، برند، قیمت، موجودی، آدرس، شماره تماس، ترکیبات، رنگ، حجم، SPF یا ویژگی‌ای را که منبع معتبر تأیید نکرده جعل نکن. '
+      'کاتالوگ واقعی لیانا مرجع قطعی محصول، قیمت و موجودی است؛ محصولی را به لیانا نسبت نده مگر واقعاً در کاتالوگ پیدا شده باشد. اگر تطابق پیدا نشد، صادقانه بگو و محصول نامرتبط را به‌جای آن پیشنهاد نده. '
+      'برای اطلاعات درباره شرکت‌ها و برندها، کشور سازنده، ترکیبات، مشخصات و موضوعات روز آرایشی از نتایج جست‌وجوی وب استفاده کن؛ فقط نتیجه‌ای را بگو که با شواهد وب پشتیبانی می‌شود. اگر منبع معتبر پیدا نشد، شفاف بگو نتوانستی تأیید کنی. '
+      'نتایج وب درباره موجود بودن در لیانا، قیمت روز یا موجودی فروشگاه مدرک محسوب نمی‌شوند؛ این موارد را فقط از کاتالوگ/اطلاعات قطعی فروشگاه بگو و در غیر این صورت کاربر را برای استعلام راهنمایی کن. '
+      'وقتی چند محصول واقعی در کاتالوگ موجودند، درخواست کاربر مثل نوع پوست/مو، کاربرد، رنگ دلخواه، بودجه و ترجیحاتش را لحاظ کن؛ اگر برای انتخاب دقیق اطلاعات مهمی کم است یک سؤال کوتاه بپرس. '
+      'اگر پاسخ بر جست‌وجوی وب متکی است، منابع را با عنوان و لینک قابل کلیک در انتهای پاسخ بیاور و تفاوت اطلاعات تأییدشده با توصیه عمومی را روشن کن. '
       'از ادعاهای پزشکی قطعی پرهیز کن و برای مشکلات پوستی شدید یا ماندگار مراجعه به متخصص را پیشنهاد بده. '
-      'پاسخ را مفهوم، مشخص و طبیعی بنویس و در صورت تناسب از ۱ تا ۳ ایموجی مرتبط استفاده کن. '
-      'به سلام و احوالپرسی کوتاه و تشکر می‌توانی طبیعی پاسخ بدهی. به سؤال‌های خارج از حوزه آرایش و بهداشتی پاسخ محتوایی نده و محترمانه موضوع مجاز را یادآوری کن.'
+      'به سلام و احوالپرسی و تشکر طبیعی و صمیمی جواب بده. درباره موضوعات خارج از حوزه گفته‌شده پاسخ محتوایی نده و محترمانه موضوع مجاز را یادآوری کن.'
     )
     contents=[]
     for item in history[-10:]:
@@ -1485,8 +1513,15 @@ async def call_gemini(user_text:str, history=None):
     payload={
         'systemInstruction': {'parts':[{'text':system_prompt}]},
         'contents': contents,
-        'generationConfig': {'temperature':0.55,'maxOutputTokens':700}
+        'generationConfig': {'temperature':0.45,'maxOutputTokens':1000}
     }
+    # Gemini's Google Search grounding supplies fresh web evidence and source URLs.
+    # Enable it for beauty/brand questions so answers can be checked by the customer.
+    if wants_web_research or any(normalize_fa(term) in qn for term in (
+        'محصول چیه','چی هست','چه کاربردی','برای چی خوبه','ترکیب','مواد موثر',
+        'فرق بین','تفاوت','جدیدترین','ترند','معرفی برند','برندهای آرایشی'
+    )):
+        payload['tools'] = [{'google_search': {}}]
     url=f'https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent'
     # Retry transient network/API failures with exponential backoff. A longer timeout
     # gives Gemini room to finish a normal answer without hanging forever.
@@ -1508,6 +1543,24 @@ async def call_gemini(user_text:str, history=None):
                             parts=(candidates[0].get('content') or {}).get('parts') or []
                             answer=''.join(str(part.get('text','')) for part in parts if part.get('text')).strip()
                             if answer:
+                                # Add real citations returned by Gemini grounding metadata.
+                                metadata=(candidates[0].get('groundingMetadata') or candidates[0].get('grounding_metadata') or {})
+                                chunks=metadata.get('groundingChunks') or metadata.get('grounding_chunks') or []
+                                sources=[]
+                                seen_urls=set()
+                                for chunk in chunks:
+                                    web_item=chunk.get('web') or {}
+                                    uri=str(web_item.get('uri') or '').strip()
+                                    title=str(web_item.get('title') or uri).strip()
+                                    if uri.startswith(('https://','http://')) and uri not in seen_urls:
+                                        seen_urls.add(uri)
+                                        sources.append((title,uri))
+                                    if len(sources)>=4:
+                                        break
+                                if sources:
+                                    answer += '\n\n🔎 منابع برای بررسی بیشتر:\n' + '\n'.join(
+                                        f'• {title[:120]} — {uri}' for title,uri in sources
+                                    )
                                 return answer
                         last_error='Gemini returned no text candidate'
                     else:
