@@ -16,8 +16,8 @@ PHONE_2=os.getenv("PHONE_2", "09904358418").strip()
 SHOP_URL=os.getenv("SHOP_URL", "https://liyanashop.ir").strip()
 TG_URL=os.getenv("TELEGRAM_URL", "https://t.me/liyanashop_ir").strip()
 RUBIKA_URL=os.getenv("RUBIKA_URL", "https://rubika.ir/liyanashop_gnv").strip()
-GROQ_API_KEY=os.getenv("GROQ_API_KEY", "").strip()
-GROQ_MODEL=os.getenv("GROQ_MODEL", "llama-3.3-70b-versatile").strip()
+GEMINI_API_KEY=os.getenv("GEMINI_API_KEY", "").strip()
+GEMINI_MODEL=os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
 PRODUCTS_CSV_URL=os.getenv("PRODUCTS_CSV_URL", "").strip()
 CSV_REFRESH_SECONDS=max(60, int(os.getenv("CSV_REFRESH_SECONDS", "600")))
 OWNER_TELEGRAM_ID=os.getenv("OWNER_TELEGRAM_ID", "").strip()
@@ -641,6 +641,45 @@ def product_name_matches(query:str):
         if q in name or name in q:
             exact.append(p)
     return exact
+
+def is_cosmetics_only_question(q:str, history=None)->bool:
+    """Allow only beauty/cosmetics topics in the public AI chat, plus brief social replies."""
+    qn=normalize_fa(q)
+    if not qn:
+        return False
+    # Brief greetings and courtesy messages are allowed so the chat feels natural.
+    if is_small_talk(qn):
+        return True
+    # Follow-up answers (e.g. skin type, tone, budget) are allowed only in an active beauty discussion.
+    if history:
+        last_assistant=normalize_fa(next((x.get('content','') for x in reversed(history) if x.get('role')=='assistant'),''))
+        previous_user=normalize_fa(next((x.get('content','') for x in reversed(history) if x.get('role')=='user'),''))
+        followup_markers=('رنگ پوست','تناژ','نوع پوست','پوستت چرب','پوستت خش','بودجه','برای تیرگی','برای لک','کدام محصول','کدوم محصول','چه محصول')
+        beauty_markers=('آرایش','آرایشی','بهداشتی','زیبایی','میکاپ','پوست','مو','ناخن','لب','چشم','ابرو','مژه','رژ','ریمل','کرم','ضدآفتاب','عطر','ادکلن','بادی اسپلش','تینت','پرایمر','کانسیلر','پنکیک','شوینده','آبرسان','مرطوب کننده','تونر','سرم','ماسک','پرایمر','لاک','محصول')
+        if len(qn.split())<=6 and any(x in last_assistant for x in followup_markers) and any(x in (previous_user+' '+last_assistant) for x in beauty_markers):
+            return True
+    # Exact product names in the current catalogue count as cosmetics/store-product questions.
+    if product_name_matches(qn):
+        return True
+    # Beauty-specific vocabulary. Deliberately exclude generic store, address, delivery and unrelated terms.
+    beauty_terms=(
+      'آرایش','آرایشی','بهداشتی','زیبایی','میکاپ','پوست','مو','ناخن','لب','چشم','ابرو','مژه',
+      'رژ','ریمل','خط چشم','سایه','رژگونه','هایلایتر','کانتور','تینت','بی بی کرم','سی سی کرم','کوشن',
+      'کرم پودر','کرمپودر','فوندیشن','پرایمر','کانسیلر','پنکیک','پودر فیکس','فیکساتور','اسپری فیکس',
+      'بالم لب','لیپ گلاس','برق لب','مداد ابرو','ژل ابرو','صابون ابرو','فرمژه','مژه مصنوعی','چسب مژه',
+      'لاک','ناخن','پاک کننده لاک','پد لاک','شوینده','فیس واش','میسلار','تونر','سرم','آبرسان',
+      'مرطوب کننده','ماسک صورت','جوش','آکنه','جای جوش','لک صورت','منافذ','روتین پوست','ضدآفتاب',
+      'ضد آفتاب','spf','ترکیبات محصول','رنگ پوست','تناژ','پوست چرب','پوست خشک','پوست مختلط','پوست حساس',
+      'عطر','ادکلن','بادی اسپلش','خوشبوکننده','براش','پد آرایشی','اسفنج آرایشی','پاک کردن آرایش',
+      'محصول آرایشی','محصول بهداشتی','محصول مراقبت','موجودی ریمل','قیمت ریمل','قیمت رژ','قیمت کرم'
+    )
+    if any(normalize_fa(term) in qn for term in beauty_terms):
+        return True
+    # Allow purchase/price/stock questions only when they clearly name a cosmetic product.
+    if any(x in qn for x in ('قیمت','چنده','چقدر','موجود','دارید','دارین','میخوام','می خواهم','می خوام','پیدا کن','پیشنهاد بده','چی بخرم')):
+        return any(x in qn for x in ('ریمل','رژ','کرم','تینت','عطر','ادکلن','بادی اسپلش','ضدآفتاب','لاک','شوینده','آبرسان','کانسیلر','پرایمر','پنکیک','لیپ گلاس','محصول آرایشی','محصول بهداشتی')) or bool(search_products(qn, limit=1))
+    return False
+
 
 def is_beauty_question(q:str)->bool:
     qn=normalize_fa(q)
@@ -1335,59 +1374,63 @@ def offline_answer(user_text:str, history=None)->str:
                 return '🔎 از روی کلمات کلیدی پیامت، این محصولات مرتبط رو در لیانا پیدا کردم 🌷\n\n'+'\n'.join(lines)+'\n\nبرای دیدن جزئیات و صفحه مستقیم هر محصول از دکمه‌های زیر استفاده کن. اگر کاربرد یا بودجه‌ی خاصی مدنظرت هست بگو تا پیشنهادها رو دقیق‌تر کنم.'
     return '🌸 من دستیار لیانا شاپ هستم و می‌تونم درباره آرایش، مراقبت پوست و مو، انتخاب محصولات، قیمت و موجودی، آدرس فروشگاه و خرید راهنمایی‌ات کنم. مثلاً بنویس «یه تینت لب خوب می‌خوام»، «برای پوست چرب چی مناسبه؟» یا «یه بادی‌اسپلش خوشبو معرفی کن». اگر منظورت محصول خاصیه، اسم یا کاربردش رو بگو تا داخل محصولات لیانا جست‌وجو کنم.'
 
-async def call_groq(user_text:str, history=None):
-    """Use verified local product records first, then optional AI with relevant product context."""
+async def call_gemini(user_text:str, history=None):
+    """Answer AI chat with Gemini only; do not retrieve local KB, learned FAQs, or catalog data."""
     history=history or []
     interpreted_text=contextual_query(user_text,history)
-    q=normalize_fa(interpreted_text)
-    taught=learned_owner_answer(interpreted_text)
-    if taught:
-        return taught
-    # Price/stock/existence questions must be grounded in the store's current catalog data.
-    if any(x in q for x in ('قیمت','چنده','چقدر','موجود','دارید','دارین','وجود داره','هست یا نه','پیدا میشه')):
-        local=product_status_answer(interpreted_text)
-        if local:
-            return local
-    if not GROQ_API_KEY:
-        return offline_answer(interpreted_text,history=history)
-    products=product_context(interpreted_text, limit=10)
-    kb_answer=knowledge_answer(interpreted_text) or ''
+    if not is_cosmetics_only_question(interpreted_text, history=history):
+        return '🌷 من در این بخش فقط درباره آرایش، محصولات آرایشی و بهداشتی و مراقبت پوست و مو راهنمایی می‌کنم. لطفاً سؤالت رو در همین زمینه بپرس 💄🧴'
+    if not GEMINI_API_KEY:
+        return '🌷 دستیار هوشمند فعلاً در دسترس نیست. لطفاً کمی بعد دوباره امتحان کن.'
     system_prompt=(
-      'تو مشاور فروش خوش‌برخورد و آگاه فروشگاه «لیانا شاپ» هستی و فقط به فارسی طبیعی پاسخ می‌دهی. '
-      'به مشتری هرگز درباره فایل، JSON، دیتابیس، کد، منبع داخلی یا روش فنی دریافت اطلاعات حرف نزن. '
-      'از اطلاعات محصولی که در زمینه گفتگو آمده استفاده کن؛ نام، رنگ، ترکیبات، حجم، SPF، ماندگاری، ادعای درمانی یا سازگاری را اگر منبعی تأیید نکرده، نساز. '
-      'اگر رنگ‌ها/ویژگی‌ها در داده محصول ثبت نشده‌اند، شفاف بگو اطلاعات دقیق آن مورد را نداریم و لینک محصول/فروشگاه را پیشنهاد بده. '
-      'برای پیشنهاد محصول، ابتدا نیاز و نوع پوست/تناژ/بودجه مشتری را در نظر بگیر؛ اگر کافی نیست یک سؤال کوتاه بپرس. '
-      'قیمت و موجودی ممکن است تغییر کند؛ فقط اعداد و وضعیت موجود در داده مرتبط را گزارش کن و برای تأیید نهایی ارجاع به فروشگاه بده. '
-      'از ادعاهای پزشکی قطعی پرهیز کن، در حساسیت شدید یا مشکلات پوستی ماندگار مراجعه به متخصص را پیشنهاد بده. '
-      'پاسخ را مفهوم، مشخص و متناسب با سؤال بنویس؛ هر بار جمله‌بندی را طبیعی و متفاوت کن. در صورت تناسب از ۱ تا ۳ ایموجی مرتبط مثل 🌷✨💄🧴 استفاده کن، اما ایموجی را جای اطلاعات دقیق نگذار و استیکر یا اطلاعات ساختگی ادعا نکن. پیام‌های اجتماعی مثل دوستت دارم، اوکی، چه خبر و تشکر را طبیعی و متناسب پاسخ بده. اگر کاربر بهترین تینت/محصول را خواست، از محصولات مرتبط موجود چند گزینه نام ببر و ویژگی عمومی همان دسته را توضیح بده. برای رنگ کانسیلر/پنکیک/رژلب، اگر نوع پوست، رنگ و تناژ کافی نیست یک سؤال کوتاه بپرس. برای درخواست محصول مرتبط، مکمل‌های مناسب را از فهرست محصولات پیدا کن. پاسخ را به شکل فروشنده واقعی ارائه کن و درباره روش فنی دریافت اطلاعات توضیح نده.'
+      'تو یک مشاور خوش‌برخورد و آگاه در زمینه آرایش، محصولات آرایشی و بهداشتی و مراقبت پوست و مو هستی. '
+      'فقط به فارسی طبیعی پاسخ بده و فقط درباره همین موضوع‌ها راهنمایی کن. '
+      'در این گفت‌وگو به هیچ پایگاه داده محلی، فایل CSV، فهرست محصولات، پاسخ‌های ذخیره‌شده یا اطلاعات آموزش‌داده‌شده فروشگاه دسترسی نداری؛ '
+      'پس هرگز ادعا نکن محصولی در لیانا موجود است یا قیمت و موجودی مشخصی دارد. اگر قیمت یا موجودی پرسیده شد، توضیح بده که نمی‌توانی وضعیت لحظه‌ای فروشگاه را تأیید کنی و پیشنهاد بده از فروشگاه استعلام بگیرد. '
+      'درباره ویژگی‌های خاص یک محصول، ترکیبات، رنگ‌ها، حجم، SPF یا ادعای درمانی اگر مطمئن نیستی حدس نزن و صریح بگو اطلاعات کافی نداری. '
+      'برای انتخاب محصول، نیاز و نوع پوست/مو، بودجه و ترجیحات کاربر را در نظر بگیر؛ اگر اطلاعات کافی نیست یک سؤال کوتاه بپرس. '
+      'از ادعاهای پزشکی قطعی پرهیز کن و برای مشکلات پوستی شدید یا ماندگار مراجعه به متخصص را پیشنهاد بده. '
+      'پاسخ را مفهوم، مشخص و طبیعی بنویس و در صورت تناسب از ۱ تا ۳ ایموجی مرتبط استفاده کن. '
+      'به سلام و احوالپرسی کوتاه و تشکر می‌توانی طبیعی پاسخ بدهی. به سؤال‌های خارج از حوزه آرایش و بهداشتی پاسخ محتوایی نده و محترمانه موضوع مجاز را یادآوری کن.'
     )
-    context='اطلاعات مرتبط محصولات فروشگاه (فقط برای راهنمایی دقیق؛ این داده‌ها را به شکل فایل یا منبع فنی به مشتری معرفی نکن):\n'+json.dumps(products,ensure_ascii=False)
-    if kb_answer:
-        context+='\nدانش عمومی مرتبط: '+kb_answer
-    messages=[{'role':'system','content':system_prompt}]
-    # Conversation turns are included so the model can understand «همون»، «این رنگ»،
-    # and short answers to its own clarifying questions.
-    messages.extend(history[-10:])
-    messages.append({'role':'user','content':context+'\n\nپیام فعلی مشتری: '+user_text+'\nبرداشت از پیام با توجه به مکالمه: '+interpreted_text})
-    payload={'model':GROQ_MODEL,'messages':messages,'temperature':0.55,'max_tokens':700}
+    contents=[]
+    for item in history[-10:]:
+        role=item.get('role','user')
+        if role == 'system':
+            continue
+        gemini_role='model' if role in ('assistant','model') else 'user'
+        content=str(item.get('content','')).strip()
+        if content:
+            contents.append({'role':gemini_role,'parts':[{'text':content}]})
+    contents.append({'role':'user','parts':[{'text':user_text}]})
+    payload={
+        'systemInstruction': {'parts':[{'text':system_prompt}]},
+        'contents': contents,
+        'generationConfig': {'temperature':0.55,'maxOutputTokens':700}
+    }
+    url=f'https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent'
     try:
-        timeout=aiohttp.ClientTimeout(total=18)
+        timeout=aiohttp.ClientTimeout(total=25)
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post('https://api.groq.com/openai/v1/chat/completions',headers={'Authorization':'Bearer '+GROQ_API_KEY,'Content-Type':'application/json'},json=payload) as response:
+            async with session.post(url,headers={'x-goog-api-key':GEMINI_API_KEY,'Content-Type':'application/json'},json=payload) as response:
+                body=await response.json(content_type=None)
                 if response.status==200:
-                    body=await response.json()
-                    answer=body['choices'][0]['message']['content'].strip()
-                    if answer: return answer
-    except Exception:
-        pass
-    return offline_answer(interpreted_text,history=history)
+                    candidates=body.get('candidates') or []
+                    if candidates:
+                        parts=(candidates[0].get('content') or {}).get('parts') or []
+                        answer=''.join(str(part.get('text','')) for part in parts if part.get('text')).strip()
+                        if answer:
+                            return answer
+                print(f'Gemini API error: HTTP {response.status}: {str(body)[:1200]}')
+    except Exception as exc:
+        print(f'Gemini API request failed: {type(exc).__name__}: {exc}')
+    return '🌷 فعلاً نتونستم به دستیار هوشمند وصل بشم. لطفاً کمی بعد دوباره پیام بده.'
 
 @dp.callback_query(F.data=='ai:open')
 async def cb_ai_open(c:CallbackQuery):
     uid=c.from_user.id
     AI_USERS.add(uid); OWNER_PASSWORD_PENDING.discard(uid); history_clear(uid)
-    await c.message.answer('🤖 <b>دستیار محصولات لیانا شاپ</b>\n\nبه پرسش‌های رایج آرایش و مراقبت پوست و مو پاسخ می‌دهم، سؤال‌های محاوره‌ای را می‌فهمم و در محصولات لیانا جست‌وجو می‌کنم؛ اگر اطلاعات دقیق رنگ یا ترکیبات محصول مشخص نباشد، حدس نمی‌زنم و راه بررسی را پیشنهاد می‌دهم.\n\nمی‌توانی درباره مراقبت پوست، اصول آرایش، ایمنی محصولات، نام محصول، قیمت یا موجودی محصولات بپرسی؛ سؤال‌های نامرتبط پاسخ داده نمی‌شوند.\n\nپیامت را بفرست؛ برای خروج دکمه زیر را بزن.',reply_markup=ai_kb())
+    await c.message.answer('🤖 <b>دستیار آرایشی و بهداشتی لیانا شاپ</b>\n\nاینجا فقط به سؤال‌های مربوط به آرایش، محصولات آرایشی و بهداشتی، مراقبت پوست و مو و قیمت یا موجودی همین محصولات پاسخ می‌دهم. 🌷\n\nسؤال‌های نامرتبط با این موضوع پاسخ داده نمی‌شوند. اسم محصول یا نیازت رو بنویس تا راهنمایی‌ات کنم و اگر لازم بود داخل محصولات لیانا جست‌وجو کنم.\n\nپیامت را بفرست؛ برای خروج دکمه زیر را بزن.',reply_markup=ai_kb())
     await c.answer()
 
 @dp.callback_query(F.data=='ai:continue')
@@ -1771,12 +1814,11 @@ async def text_search(m:Message):
             return
     if uid in AI_USERS and not q.startswith('/'):
         if len(q)<2: return
-        # Reload a locally replaced WooCommerce CSV before AI product lookup.
-        load_local_csv()
+        # AI chat intentionally does not load or query local CSV/database data.
         history=history_get(uid)
         interpreted=contextual_query(q,history)
         # Let greetings, casual conversation, store questions and recommendation requests reach intent handling.
-        answer=await call_groq(q,history=history)
+        answer=await call_gemini(q,history=history)
         history_add(uid,'user',q)
         history_add(uid,'assistant',answer)
         # Use the pre-turn history when deriving product buttons so a short answer
