@@ -1,6 +1,6 @@
 import asyncio, csv, io, json, os, re, sqlite3, time, hashlib
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, unquote, urlparse, parse_qs
 from dotenv import load_dotenv
 from aiogram import Bot, Dispatcher, F
 from aiogram.filters import CommandStart, Command
@@ -17,8 +17,10 @@ PHONE_2=os.getenv("PHONE_2", "09904358418").strip()
 SHOP_URL=os.getenv("SHOP_URL", "https://liyanashop.ir").strip()
 TG_URL=os.getenv("TELEGRAM_URL", "https://t.me/liyanashop_ir").strip()
 RUBIKA_URL=os.getenv("RUBIKA_URL", "https://rubika.ir/liyanashop_gnv").strip()
-GEMINI_API_KEY=os.getenv("GEMINI_API_KEY", "").strip()
+GEMINI_API_KEY=os.getenv("GEMINI_API_KEY", os.getenv("GOOGLE_API_KEY", "")).strip()
 GEMINI_MODEL=os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
+GROQ_API_KEY=os.getenv("GROQ_API_KEY", "").strip()
+GROQ_MODEL=os.getenv("GROQ_MODEL", "openai/gpt-oss-120b").strip()
 PRODUCTS_CSV_URL=os.getenv("PRODUCTS_CSV_URL", "").strip()
 CSV_REFRESH_SECONDS=max(60, int(os.getenv("CSV_REFRESH_SECONDS", "600")))
 OWNER_TELEGRAM_ID=os.getenv("OWNER_TELEGRAM_ID", "").strip()
@@ -1466,6 +1468,103 @@ def catalog_request_reply(query:str, limit:int=5):
     return '\n'.join(out).strip()
 
 
+async def _duckduckgo_web_search(query:str, limit:int=5):
+    """Lightweight public web search fallback for Groq-only deployments."""
+    from html import unescape
+    from html.parser import HTMLParser
+    class ResultParser(HTMLParser):
+        def __init__(self):
+            super().__init__(); self.items=[]; self.mode=None; self.buf=''; self.href=''
+        def handle_starttag(self, tag, attrs):
+            attrs=dict(attrs)
+            classes=attrs.get('class','')
+            if tag=='a' and 'result__a' in classes.split():
+                self.mode='title'; self.buf=''; self.href=attrs.get('href','')
+            elif tag in ('a','div') and ('result__snippet' in classes.split()):
+                self.mode='snippet'; self.buf=''
+        def handle_data(self, data):
+            if self.mode: self.buf += data
+        def handle_endtag(self, tag):
+            if self.mode=='title' and tag=='a':
+                title=' '.join(self.buf.split()); url=self.href
+                if 'uddg=' in url:
+                    try: url=parse_qs(urlparse(url).query).get('uddg',[url])[0]
+                    except Exception: pass
+                if title and url.startswith(('http://','https://')):
+                    self.items.append({'title':title,'url':url,'snippet':''})
+                self.mode=None
+            elif self.mode=='snippet' and tag=='div':
+                snippet=' '.join(self.buf.split())
+                if snippet and self.items and not self.items[-1]['snippet']:
+                    self.items[-1]['snippet']=snippet
+                self.mode=None
+    try:
+        timeout=aiohttp.ClientTimeout(total=12, connect=5)
+        headers={'User-Agent':'Mozilla/5.0 (compatible; LianaShopBot/1.0)'}
+        async with aiohttp.ClientSession(timeout=timeout,headers=headers) as session:
+            async with session.get('https://html.duckduckgo.com/html/',params={'q':query},allow_redirects=True) as resp:
+                if resp.status != 200:
+                    print(f'Web search fallback HTTP {resp.status}')
+                    return []
+                html_text=await resp.text(errors='ignore')
+        parser=ResultParser(); parser.feed(html_text)
+        seen=set(); out=[]
+        for item in parser.items:
+            if item['url'] in seen: continue
+            seen.add(item['url']); out.append(item)
+            if len(out)>=limit: break
+        return out
+    except Exception as exc:
+        print(f'Web search fallback failed: {type(exc).__name__}: {exc}')
+        return []
+
+async def call_groq_with_web_search(user_text:str, history=None, user_id=None):
+    """Groq fallback with public web search snippets supplied as grounded context."""
+    history=history or []
+    if not GROQ_API_KEY:
+        print('AI config error: neither GEMINI_API_KEY/GOOGLE_API_KEY nor GROQ_API_KEY is configured')
+        return '🌷 دستیار هوشمند تنظیم نشده است. در FadeHost متغیر GEMINI_API_KEY (برای جست‌وجوی گوگل) یا GROQ_API_KEY را بررسی کن.'
+    results=await _duckduckgo_web_search(user_text,5)
+    web_context=''
+    if results:
+        web_context='\n\nنتایج جست‌وجوی وب (منبع بیرونی؛ صحت هر مورد را ارزیابی کن):\n'+'\n'.join(
+            f"{i+1}. {x['title']}\n{x.get('snippet','')}\nURL: {x['url']}" for i,x in enumerate(results)
+        )
+    system_prompt=(
+        'تو دستیار هوش مصنوعی عمومی فارسی‌زبان و خوش‌برخورد هستی. به سؤال‌های مجاز در موضوعات عمومی، علم، فناوری، برنامه‌نویسی، تاریخ، شرکت‌ها، برندها، آرایش و محصولات پاسخ بده و خودت را به حوزه آرایشی محدود نکن. '
+        'برای اطلاعات روز از نتایج جست‌وجوی وبی که در پیام کاربر می‌آید استفاده کن؛ لینک‌ها را جعل نکن و منابع را با URL دقیق ذکر کن. اگر نتیجه‌ای پیدا نشد، شفاف بگو جست‌وجوی وب در دسترس نبود و اطلاعات روز را قطعی جلوه نده. '
+        'برای قیمت و موجودی فروشگاه، فقط به داده‌های واقعی کاتالوگ تکیه کن؛ از اینترنت موجودی فروشگاه را حدس نزن. فارسی طبیعی و مستقیم بنویس.'
+    )
+    messages=[{'role':'system','content':system_prompt}]
+    for item in history[-8:]:
+        role=item.get('role','user')
+        if role in ('assistant','user') and str(item.get('content','')).strip():
+            messages.append({'role':role,'content':str(item.get('content',''))[:3000]})
+    messages.append({'role':'user','content':user_text+web_context})
+    timeout=aiohttp.ClientTimeout(total=60,connect=15,sock_read=50)
+    try:
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post('https://api.groq.com/openai/v1/chat/completions',
+                headers={'Authorization':f'Bearer {GROQ_API_KEY}','Content-Type':'application/json'},
+                json={'model':GROQ_MODEL,'messages':messages,'temperature':0.4,'max_tokens':1200}) as response:
+                body=await response.json(content_type=None)
+                if response.status != 200:
+                    detail=str(body)[:700]
+                    print(f'Groq API error HTTP {response.status}: {detail}')
+                    return '🌷 سرویس هوش مصنوعی خطا داد. جزئیات در Logs ثبت شد؛ کلید API و نام مدل را بررسی کن.'
+                choices=body.get('choices') or []
+                answer=str(((choices[0].get('message') or {}).get('content')) or '').strip() if choices else ''
+                if not answer:
+                    print(f'Groq returned no answer: {str(body)[:500]}')
+                    return '🌷 سرویس هوش مصنوعی پاسخ متنی برنگرداند. جزئیات در Logs ثبت شد.'
+                if results:
+                    answer+='\n\n🔎 منابع وب:\n'+'\n'.join(f"• {x['title']} — {x['url']}" for x in results[:5])
+                return answer
+    except Exception as exc:
+        print(f'Groq request failed: {type(exc).__name__}: {exc}')
+        return '🌷 ارتباط با سرویس هوش مصنوعی برقرار نشد. جزئیات خطا در Logs ثبت شد.'
+
+
 async def call_gemini(user_text:str, history=None, user_id=None):
     """Answer AI chat with Gemini, with a deterministic real-catalog search for product-family requests."""
     history=history or []
@@ -1503,7 +1602,9 @@ async def call_gemini(user_text:str, history=None, user_id=None):
     beauty_brand_terms = ('ویولت','شیگلم','xixi','ایکس ایکس آی','ارت اسکین','آرت اسکین','جولیوم','کماس','کالیستا','مای','فلورمار','گلدن رز','نوت','لورال','مک','میبلین','اسنس','رولوشن','روماند','گابرینی','بیول','لافارر','سینره','درماتیپیک')
     brand_context = wants_web_research and any(normalize_fa(term) in qn for term in beauty_brand_terms)
     if not GEMINI_API_KEY:
-        return '🌷 دستیار هوشمند فعلاً در دسترس نیست. لطفاً کمی بعد دوباره امتحان کن.'
+        # Backward compatibility for deployments that still have only a Groq key.
+        # Gemini is preferred because its Google Search grounding returns first-party citations.
+        return await call_groq_with_web_search(interpreted_text, history=history, user_id=user_id)
     remembered_facts=[]
     # Pull long-term user preferences from the persistent SQLite memory.
     try:
@@ -1596,7 +1697,11 @@ async def call_gemini(user_text:str, history=None, user_id=None):
         if attempt < 3:
             await asyncio.sleep(min(2 ** attempt, 8))
     print(f'Gemini failed after retries: {last_error}')
-    return '🌷 ارتباط با دستیار هوشمند موقتاً برقرار نشد. کمی بعد دوباره پیام بده؛ من اینجام که کمکت کنم.'
+    # If both providers are configured, use Groq as a fallback instead of dropping the message.
+    if GROQ_API_KEY:
+        print('Falling back to Groq after Gemini failure.')
+        return await call_groq_with_web_search(interpreted_text, history=history, user_id=user_id)
+    return '🌷 ارتباط با سرویس هوش مصنوعی برقرار نشد. خطای دقیق در Logs ثبت شده؛ کلید Gemini و نام مدل را بررسی کن.'
 
 @dp.callback_query(F.data=='ai:open')
 async def cb_ai_open(c:CallbackQuery):
