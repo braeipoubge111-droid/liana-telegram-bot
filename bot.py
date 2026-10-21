@@ -826,11 +826,14 @@ def search_products(query, limit=8):
     def search_norm(value):
         value = normalize_fa(value)
         replacements = (
-            ('بادیاسپلش', 'بادی اسپلش'), ('لیپگلاس', 'لیپ گلاس'),
+            ('بادیاسپلش', 'بادی اسپلش'), ('بادی‌اسپلش', 'بادی اسپلش'),
+            ('لیپگلاس', 'لیپ گلاس'), ('لیپ‌گلاس', 'لیپ گلاس'),
             ('رژلب', 'رژ لب'), ('کرمپودر', 'کرم پودر'),
             ('ضدافتاب', 'ضد آفتاب'), ('ضدآفتاب', 'ضد آفتاب'),
             ('فیسواش', 'فیس واش'), ('خطچشم', 'خط چشم'),
             ('رژگونه', 'رژ گونه'), ('مدادابرو', 'مداد ابرو'),
+            ('مرطوب‌کننده', 'مرطوب کننده'), ('آبرسانی', 'آبرسان'),
+            ('برقلب', 'برق لب'), ('گلاسلب', 'گلاس لب'),
         )
         for old, new_value in replacements:
             value = value.replace(old, new_value)
@@ -939,8 +942,8 @@ def search_products(query, limit=8):
 # filtered back to actual catalog names so a request for lip gloss does not show tools.
 PRODUCT_INTENTS = [
     ('ضد آفتاب', ('ضد آفتاب','ضدافتاب','ضدآفتاب','ضد افتاب','sunscreen')),
-    ('بادی اسپلش', ('بادی اسپلش','بادیاسپلش','بادی اسپری','اسپری بدن','خوشبوکننده بدن')),
-    ('لیپ گلاس', ('لیپ گلاس','لیپگلاس','برق لب','گلاس لب','lip gloss')),
+    ('بادی اسپلش', ('بادی اسپلش','بادیاسپلش','بادی اسپری','اسپری بدن','خوشبوکننده بدن','body splash','body mist','body spray','بادی میست')),
+    ('لیپ گلاس', ('لیپ گلاس','لیپگلاس','برق لب','گلاس لب','lip gloss','lipgloss','lip-gloss')),
     ('رژ لب', ('رژ لب','رژلب','رژ مایع','رژ جامد','رژ مات','رژ براق')),
     ('تینت', ('تینت','تینت لب','تینت گونه')),
     ('خط لب', ('خط لب','مداد لب')),
@@ -1579,6 +1582,83 @@ async def call_groq_with_web_search(user_text:str, history=None, user_id=None):
 
 
 
+def skin_profile_catalog_reply(query: str, limit: int = 3):
+    """Use the real catalog to answer short skin-type statements such as 'پوستم خشکه'."""
+    q = normalize_fa(query)
+    if not q:
+        return None
+    profiles = [
+        (('پوستم خشکه', 'پوست من خشک است', 'پوست خشک دارم', 'خشکی پوست', 'پوستم خشکه'),
+         ('مرطوب کننده', 'آبرسان', 'هیالورونیک', 'لوسیون', 'کرم دست', 'کرم صورت', 'مراقبت پوست'),
+         'برای پوست خشک معمولاً مرطوب‌کننده و آبرسان ملایم انتخاب خوبی است. بهتره بعد از شست‌وشو روی پوست کمی نم‌دار استفاده بشه و از شوینده‌های قوی و آب داغ کمتر استفاده کنی.'),
+        (('پوستم چربه', 'پوست من چرب است', 'پوست چرب دارم', 'پوستم چربه'),
+         ('شوینده', 'فیس واش', 'ژل شستشو', 'ضد آفتاب', 'آبرسان', 'مرطوب کننده', 'مراقبت پوست'),
+         'برای پوست چرب معمولاً شوینده ملایم و مرطوب‌کننده سبک و غیرکومدون‌زا مناسب‌تره؛ چرب بودن پوست به معنی حذف کامل مرطوب‌کننده نیست.'),
+        (('پوستم حساسه', 'پوست من حساس است', 'پوست حساس دارم'),
+         ('مرطوب کننده', 'آبرسان', 'کرم دست', 'مراقبت پوست'),
+         'برای پوست حساس بهتره سراغ محصولات ساده و ملایم بری و محصول جدید رو اول روی بخش کوچکی از پوست امتحان کنی. اگر سوزش یا قرمزی ایجاد شد، مصرف رو قطع کن.'),
+        (('پوستم مختلطه', 'پوست من مختلط است', 'پوست مختلط دارم'),
+         ('شوینده', 'فیس واش', 'آبرسان', 'مرطوب کننده', 'مراقبت پوست'),
+         'برای پوست مختلط معمولاً شوینده ملایم و آبرسان سبک انتخاب مناسبیه؛ روی نواحی خشک و چرب می‌تونی مقدار متفاوتی استفاده کنی.'),
+        (('جوش میزنم', 'جوش می زنم', 'پوستم جوش میزنه', 'پوست من جوش می زند', 'جوش دارم'),
+         ('ضد جوش', 'آکنه', 'شوینده', 'فیس واش', 'سرم جوش', 'مراقبت پوست'),
+         'برای پوست مستعد جوش، روتین ساده و محصولات ملایم بهتره؛ از چند ماده فعال قوی به‌صورت هم‌زمان شروع نکن. اگر جوش‌ها دردناک یا ماندگارند، متخصص پوست می‌تونه کمک کنه.'),
+    ]
+    selected = None
+    for phrases, keywords, advice in profiles:
+        if any(normalize_fa(phrase) in q for phrase in phrases):
+            selected = (keywords, advice)
+            break
+    if not selected:
+        return None
+    keywords, advice = selected
+    # Avoid triggering on a skin statement that is clearly asking for a different specific product family.
+    ranked_products = []
+    specific_keywords = [k for k in keywords if normalize_fa(k) != 'مراقبت پوست']
+    for item in DATA:
+        if not item.get('published', True):
+            continue
+        name = normalize_fa(item.get('name', ''))
+        category = normalize_fa(item.get('category', ''))
+        score = 0
+        for keyword in specific_keywords:
+            kw = normalize_fa(keyword)
+            if kw and kw in name:
+                score = max(score, 12 + len(kw.split()))
+            elif kw and kw in category and kw not in ('کرم صورت', 'کرم دست'):
+                score = max(score, 4)
+        # Only recommend a real catalog item with a clear product-name or category match.
+        if score:
+            ranked_products.append((score, name, item))
+    ranked_products.sort(key=lambda row: (-row[0], row[1]))
+    products = [row[2] for row in ranked_products]
+    if not products:
+        return ('متوجه شدم 🌷 برای پوست خشک، معمولاً آبرسان و مرطوب‌کننده ملایم گزینه‌های خوبی‌اند. '
+                'اما فعلاً محصولی که با اطمینان به این نیاز بخوره از کاتالوگ لیانا پیدا نکردم؛ '
+                'اگر اسم محصول یا عکسش رو بفرستی، دقیق‌تر راهنمایی‌ات می‌کنم.')
+    lines = [advice, '', 'از محصولات ثبت‌شده‌ی لیانا این گزینه‌ها رو بررسی کن:']
+    for item in products[:max(1, min(limit, 4))]:
+        line = '• ' + str(item.get('name', 'محصول'))
+        variants = item.get('variants') or []
+        price = next((money_toman(v.get('price_raw')) for v in variants if money_toman(v.get('price_raw'))), None)
+        if price:
+            line += ' — ' + price
+        lines.append(line)
+    lines.append('اگر بگی بیشتر خشکی و کشیدگی داری یا پوسته‌پوسته و حساسیت هم هست، می‌تونم انتخاب رو دقیق‌تر کنم.')
+    return '\n'.join(lines)
+
+
+async def _fallback_ai_provider(user_text: str, history=None, user_id=None):
+    """Use another configured provider when OpenRouter is unavailable."""
+    if GEMINI_API_KEY:
+        print('Using Gemini fallback after OpenRouter failure.')
+        return await call_gemini(user_text, history=history, user_id=user_id)
+    if GROQ_API_KEY:
+        print('Using Groq fallback after OpenRouter failure.')
+        return await call_groq_with_web_search(user_text, history=history, user_id=user_id)
+    return None
+
+
 async def call_openrouter(user_text: str, history=None, user_id=None):
     """Reliable Persian shop assistant: small-talk routing, real-catalog grounding, and optional web research."""
     history = history or []
@@ -1635,9 +1715,21 @@ async def call_openrouter(user_text: str, history=None, user_id=None):
         except Exception as exc:
             print(f'Catalog request routing failed: {type(exc).__name__}: {exc}')
 
+    # Short skin-type statements should be understood as a request for tailored beauty guidance,
+    # not treated as an incomplete message or sent to a model without useful catalog context.
+    try:
+        skin_reply = skin_profile_catalog_reply(interpreted_text, limit=3)
+        if skin_reply is not None:
+            return skin_reply
+    except Exception as exc:
+        print(f'Skin profile/catalog routing failed: {type(exc).__name__}: {exc}')
+
     if not OPENROUTER_API_KEY:
-        print('OpenRouter config error: OPENROUTER_API_KEY is missing')
-        return '🌷 سرویس پاسخ‌گویی فعلاً تنظیم نیست. لطفاً کمی بعد دوباره امتحان کن.'
+        fallback = await _fallback_ai_provider(interpreted_text, history=history, user_id=user_id)
+        if fallback:
+            return fallback
+        print('AI config error: no OpenRouter, Gemini, or Groq API key is configured')
+        return '🌷 سرویس هوش مصنوعی به کلید API متصل نیست. تنظیمات API را در هاست بررسی کن.'
 
     # 5) Attach real catalog context for beauty/product questions. Never use this data to invent stock or prices.
     catalog_context = ''
@@ -1737,7 +1829,10 @@ async def call_openrouter(user_text: str, history=None, user_id=None):
                 body = await response.json(content_type=None)
                 if response.status != 200:
                     print(f'OpenRouter API error HTTP {response.status}: {str(body)[:1000]}')
-                    return '🌷 الان نتونستم پاسخ رو دریافت کنم. لطفاً چند لحظه دیگه دوباره امتحان کن.'
+                    fallback = await _fallback_ai_provider(interpreted_text, history=history, user_id=user_id)
+                    if fallback:
+                        return fallback
+                    return f'🌷 سرویس پاسخ نداد (خطای {response.status}). لطفاً تنظیمات مدل/API را در هاست بررسی کن.'
                 choices = body.get('choices') or []
                 answer = str(((choices[0].get('message') or {}).get('content')) or '').strip() if choices else ''
                 if not answer:
@@ -1762,10 +1857,16 @@ async def call_openrouter(user_text: str, history=None, user_id=None):
                 return answer
     except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
         print(f'OpenRouter connection failed: {type(exc).__name__}: {exc}')
-        return '🌷 ارتباط با سرویس هوش مصنوعی برقرار نشد. چند لحظه دیگر دوباره امتحان کن.'
+        fallback = await _fallback_ai_provider(interpreted_text, history=history, user_id=user_id)
+        if fallback:
+            return fallback
+        return '🌷 ارتباط با سرویس هوش مصنوعی برقرار نشد و سرویس جایگزین هم تنظیم نیست. اتصال اینترنت هاست و تنظیمات API را بررسی کن.'
     except Exception as exc:
         print(f'Unexpected OpenRouter error: {type(exc).__name__}: {exc}')
-        return '🌷 هنگام آماده‌کردن پاسخ خطایی رخ داد. لطفاً دوباره تلاش کن.'
+        fallback = await _fallback_ai_provider(interpreted_text, history=history, user_id=user_id)
+        if fallback:
+            return fallback
+        return '🌷 هنگام آماده‌کردن پاسخ خطایی رخ داد. جزئیات خطا در Logs ثبت شده است.'
 
 
 async def call_gemini(user_text:str, history=None, user_id=None):
