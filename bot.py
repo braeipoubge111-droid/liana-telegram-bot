@@ -316,13 +316,27 @@ def memory_get(user_id:int, limit:int=20):
     return [r[0] for r in reversed(rows)]
 
 def memory_update_from_user(user_id:int, text:str):
-    """Remember explicit, non-sensitive preferences/context; avoid credentials and sensitive data."""
+    """Save explicit name/preferences/context for later chats; never save credentials."""
     raw=' '.join(str(text or '').split())
     n=normalize_fa(raw)
-    markers=('من دوست دارم','من ترجیح میدم','من ترجیح می دهم','علاقه دارم','یادت باشه','یادت بماند','یادت بمونه','از این به بعد','همیشه برام','سبک مورد علاقه من','فروشگاه من','ربات من')
-    if len(raw)<8 or len(raw)>240 or not any(normalize_fa(m) in n for m in markers):
+    if len(raw)<2 or len(raw)>240:
         return
-    # Do not persist messages that appear to contain secrets, credentials, or highly sensitive data.
+    # Save a user's stated name as a distinct profile fact so the assistant can address them naturally.
+    name_match = re.search(r'(?:اسمم|اسم من)\s+([\wآ-ی‌-]{2,30})', raw)
+    if name_match and normalize_fa(raw).startswith(('اسمم','اسم من')):
+        name = name_match.group(1).strip(' .،!؟')
+        for suffix in ('هستم', 'هست', 'است', 'ام', 'م'):
+            if name.endswith(suffix) and len(name) > len(suffix) + 1:
+                name = name[:-len(suffix)]
+                break
+            fact='نامی که کاربر گفته: '+name
+            with sqlite3.connect(DB_PATH) as con:
+                con.execute("DELETE FROM ai_memory WHERE user_id=? AND fact LIKE 'نامی که کاربر گفته:%'",(user_id,))
+                con.execute("INSERT OR IGNORE INTO ai_memory(user_id,fact,created_at) VALUES(?,?,?)",(user_id,fact,int(time.time())))
+            return
+    markers=('من دوست دارم','من ترجیح میدم','من ترجیح می دهم','علاقه دارم','یادت باشه','یادت بماند','یادت بمونه','از این به بعد','همیشه برام','سبک مورد علاقه من','فروشگاه من','ربات من','اسمم','اسم من','منو صدا کن')
+    if not any(normalize_fa(m) in n for m in markers):
+        return
     sensitive=('رمز عبور','پسورد','password','توکن','api key','کلید api','کد ملی','شماره کارت','شماره حساب','آدرس دقیق خانه')
     if any(normalize_fa(x) in n for x in sensitive):
         return
@@ -996,9 +1010,9 @@ def intent_products(query, limit=8):
                 strict.append(p)
             elif family in ('آبرسان','شوینده','شامپو','لاک ناخن','ابرو','ضد جوش') and any(m and m in category for m in normalized_markers):
                 strict.append(p)
+        # Never recommend loosely related products if there is no trustworthy catalogue match.
         if not strict:
-            # Keep a conservative fallback from search ranking rather than returning no help.
-            strict=[p for p in candidates if p.get('published',True)]
+            continue
         added=0
         for p in strict:
             pid=str(p.get('id',''))
@@ -1050,11 +1064,6 @@ def conversational_keyboard(user_text:str, history:list, answer:str):
     # Include relevant catalog items, including newly imported CSV products.
     all_relevant=intent_products(q, 200)
     relevant_ids={str(p.get('id')) for p in all_relevant}
-    for p in fuzzy_catalog_products(q, 200):
-        if str(p.get('id')) not in relevant_ids:
-            all_relevant.append(p); relevant_ids.add(str(p.get('id')))
-        if len(all_relevant)>=200:
-            break
     for p in all_relevant:
         pid=str(p.get('id'))
         if pid not in seen and len(products)<5:
@@ -1571,14 +1580,14 @@ async def call_groq_with_web_search(user_text:str, history=None, user_id=None):
 
 
 async def call_openrouter(user_text:str, history=None, user_id=None):
-    """Primary AI provider: OpenRouter's OpenAI-compatible chat completions API."""
+    """OpenRouter assistant with readable Persian formatting, grounded web research and durable memory."""
     history = history or []
     interpreted_text = contextual_query(user_text, history)
     qn = normalize_fa(interpreted_text)
 
     identity_phrases = ('کی هستی', 'تو کی هستی', 'خودت کی هستی', 'معرفی خودت', 'اسمت چیه', 'تو چی هستی')
     if any(normalize_fa(x) in qn for x in identity_phrases):
-        return '🤖 من دستیار هوش مصنوعی لیانا شاپ هستم؛ می‌تونم درباره موضوعات عمومی، فناوری، برنامه‌نویسی، برندها و محصولات کمکت کنم. 🌐🌷'
+        return '🤖 من دستیار هوشمند لیانا شاپ هستم. می‌تونم درباره محصولات و فروشگاه کمک کنم، اطلاعات لازم رو در اینترنت بررسی کنم و با توجه به گفت‌وگوی قبلی جواب بدم. 🌷'
 
     store_fact_terms = (
         'آدرس فروشگاه','شماره تماس','شماره فروشگاه','ساعت کاری','شعبه','پارکینگ ملت',
@@ -1588,29 +1597,25 @@ async def call_openrouter(user_text:str, history=None, user_id=None):
     if any(normalize_fa(term) in qn for term in store_fact_terms):
         return offline_answer(interpreted_text, history=history)
 
-    research_terms = (
-        'شرکت','برند','کمپانی','سازنده','تولید کننده','تولیدکننده','کشور سازنده',
-        'ساخت کجاست','ساخت کدام کشور','اصالت','اصل یا فیک','تقلبی','ترکیبات',
-        'مواد تشکیل دهنده','نظرات','بررسی','ریویو','ترند','جدیدترین','معروف ترین',
-        'اطلاعات درباره','درباره برند','کیفیت برند','تاریخچه','وب سایت رسمی'
-    )
-    wants_web = any(normalize_fa(term) in qn for term in research_terms) or any(
-        term in qn for term in ('لیانا شاپ','لیاناشاپ','liana shop','liyanashop')
-    )
-    if not wants_web:
-        catalog_answer = catalog_request_reply(interpreted_text)
-        if catalog_answer is not None:
-            return catalog_answer
-
     if not OPENROUTER_API_KEY:
         print('OpenRouter config error: OPENROUTER_API_KEY is missing')
-        return '🌷 کلید OpenRouter تنظیم نشده است. در تنظیمات متغیرهای هاست، OPENROUTER_API_KEY را اضافه کن.'
+        return '🌷 اتصال دستیار تنظیم نشده است. متغیر OPENROUTER_API_KEY را در تنظیمات هاست بررسی کن.'
 
-    web_results = await _duckduckgo_web_search(interpreted_text, 5)
+    # Prefer web search for research/current facts, brand/company questions, and explicit search requests.
+    research_terms = (
+        'سرچ کن','جستجو کن','جست‌وجو کن','در اینترنت','منبع بده','منابع بده','لینک منبع',
+        'شرکت','برند','کمپانی','سازنده','تولید کننده','تولیدکننده','کشور سازنده','ساخت کجاست',
+        'اصالت','اصل یا فیک','تقلبی','ترکیبات','مواد تشکیل دهنده','نظرات','بررسی','ریویو',
+        'ترند','جدیدترین','معروف ترین','اطلاعات درباره','درباره برند','کیفیت برند','تاریخچه',
+        'وب سایت رسمی','قیمت روز','آخرین خبر','اطلاعات تازه','مقایسه کن'
+    )
+    wants_web = any(normalize_fa(term) in qn for term in research_terms)
+    # A short greeting or personal follow-up shouldn't trigger a noisy search every time.
+    web_results = await _duckduckgo_web_search(interpreted_text, 5) if wants_web else []
     web_context = ''
     if web_results:
-        web_context = '\\n\\nنتایج جست‌وجوی وب (برای اطلاعات تازه؛ اعتبار نتایج را ارزیابی کن):\\n' + '\\n'.join(
-            f"{i+1}. {item.get('title','')}\\n{item.get('snippet','')}\\nURL: {item.get('url','')}"
+        web_context = '\n\nاطلاعات به‌دست‌آمده از جست‌وجوی وب (منبع را بررسی کن و اگر کافی نیست، با قطعیت ادعا نکن):\n' + '\n'.join(
+            f"{i+1}. {item.get('title','')}\nخلاصه: {item.get('snippet','')}\nپیوند: {item.get('url','')}"
             for i, item in enumerate(web_results)
         )
 
@@ -1618,66 +1623,70 @@ async def call_openrouter(user_text:str, history=None, user_id=None):
     try:
         if user_id is not None:
             remembered_facts = memory_get(user_id)
-    except Exception:
-        pass
-    memory_block = ('\\nترجیحات قبلی غیرحساس کاربر در صورت مرتبط بودن: ' + ' | '.join(remembered_facts)) if remembered_facts else ''
+    except Exception as exc:
+        print(f'Persistent memory read failed: {type(exc).__name__}: {exc}')
+    memory_block = ('\nاطلاعاتی که همین کاربر قبلاً صریحاً گفته و در صورت مرتبط بودن استفاده کن: ' + ' | '.join(remembered_facts)) if remembered_facts else ''
 
     system_prompt = (
-        'تو دستیار هوش مصنوعی عمومی فارسی‌زبان، دقیق و خوش‌برخورد هستی و در موضوعات مرتبط نماینده لیانا شاپ هم هستی. '
-        'به سؤال‌های مجاز درباره موضوعات عمومی، علم، فناوری، برنامه‌نویسی، تاریخ، زبان، فرهنگ، برندها، شرکت‌ها، اخبار، آرایش و محصولات پاسخ بده؛ خودت را به آرایش محدود نکن. '
-        'فارسی روان و مستقیم بنویس و هر پیام را بی‌دلیل با سلام شروع نکن. '
-        'برای اطلاعات روز از نتایج وبِ ارائه‌شده استفاده کن؛ اگر نتیجه کافی نیست، صادقانه بگو و هرگز منبع یا لینک جعل نکن. '
-        'برای قیمت و موجودی فروشگاه، فقط به داده واقعی کاتالوگ تکیه کن و از اینترنت موجودی را حدس نزن. '
-        'اطلاعات حساس، رمزها و کلیدهای API را درخواست یا بازگو نکن. برای موضوعات پزشکی، حقوقی یا مالی محتاط باش.'
+        'تو دستیار هوشمند فارسی‌زبان لیانا شاپ هستی؛ دقیق، خوش‌برخورد، خوش‌فهم و کاربردی. '
+        'منظور کاربر را از متن فعلی، پیام نقل‌شده و سابقه مکالمه بفهم؛ اگر کاربر به پیام قبلی پاسخ داده، همان پیام را موضوع تحلیل قرار بده. '
+        'فارسی محاوره‌ایِ مرتب و طبیعی بنویس، نه ترجمه تحت‌اللفظی و نه متن خشک. '
+        'قالب پاسخ زیبا و خوانا باشد: جمله آغازین کوتاه، سپس بخش‌های مرتبط با تیترهای کوتاه و فاصله خالی بین پاراگراف‌ها؛ در صورت کمک به فهم از ایموجی کم و فهرست استفاده کن. '
+        'از دیوار متنی و پاراگراف‌های بسیار طولانی پرهیز کن. پاسخ را با سلام شروع نکن مگر طبیعی باشد. '
+        'اگر نام کاربر در حافظه آمده، گاهی و طبیعی با همان نام خطابش کن؛ در هر پیام تکرار نکن و نام را حدس نزن. '
+        'حافظه و سابقه را برای فهم منظور، ضمیرها و پیگیری سؤال‌ها به کار ببر. اطلاعاتی را که کاربر درباره خودش صریحاً گفته حفظ کن، اما رمز، کلید API، اطلاعات بانکی یا داده حساس را ذخیره یا بازگو نکن. '
+        'برای سؤال‌های پژوهشی و اطلاعات تازه، از نتایج وبی که به تو داده شده استفاده کن؛ واقعیت، برداشت و نامطمئن‌بودن را از هم جدا کن و هرگز منبع، قیمت یا لینک نساز. '
+        'اگر نتایج جست‌وجو کافی نیستند، شفاف بگو. منابع مرتبط را انتهای پاسخ در بخش «🔎 منابع» با عنوان و پیوند بیاور؛ اگر جست‌وجویی انجام نشده، منابع ساختگی اضافه نکن. '
+        'برای قیمت و موجودی لیانا شاپ فقط از کاتالوگ واقعی استفاده کن و از وب موجودی فروشگاه را حدس نزن. '
+        'محصول پیشنهاد بده فقط وقتی واقعاً با نیاز کاربر و محصولات موجود در کاتالوگ تطابق دارد؛ اگر تطابق قابل اتکا نیست، هیچ محصولی را به‌زور پیشنهاد نکن و صادقانه بگو مورد مناسبی پیدا نشد. '
+        'اگر سؤال درباره شرکت یا برند است، جواب را بر پایه منبع معتبر و با پاراگراف‌بندی واضح ارائه کن. '
+        'از سؤال‌های نامرتبط هم می‌توانی پاسخ بدهی، مگر اینکه قوانین خود ربات محدودیت دیگری اعمال کرده باشند. '
+        'برای موضوعات پزشکی، حقوقی یا مالی محتاط باش و اطلاعات نامطمئن را قطعی جلوه نده.'
         + memory_block
     )
     messages = [{'role':'system','content':system_prompt}]
-    for item in history[-10:]:
+    for item in history[-12:]:
         role = item.get('role','user')
         content = str(item.get('content','')).strip()
         if role in ('assistant','user') and content:
             messages.append({'role':role,'content':content[:3000]})
-    messages.append({'role':'user','content':interpreted_text + web_context})
+    user_content = interpreted_text
+    if web_context:
+        user_content += web_context + '\n\nلطفاً پاسخ را با پاراگراف‌بندی فارسیِ خوانا بنویس و منابع واقعی را در انتها بیاور.'
+    messages.append({'role':'user','content':user_content})
 
     timeout = aiohttp.ClientTimeout(total=60, connect=15, sock_read=50)
     headers = {
         'Authorization': f'Bearer {OPENROUTER_API_KEY}',
         'Content-Type': 'application/json',
         'HTTP-Referer': OPENROUTER_SITE_URL,
-        'X-Title': OPENROUTER_APP_NAME,
+        'X-OpenRouter-Title': OPENROUTER_APP_NAME,
     }
-    payload = {
-        'model': OPENROUTER_MODEL,
-        'messages': messages,
-        'temperature': 0.4,
-        'max_tokens': 1200,
-    }
+    payload = {'model': OPENROUTER_MODEL, 'messages': messages, 'temperature': 0.45, 'max_tokens': 1500}
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(
-                'https://openrouter.ai/api/v1/chat/completions',
-                headers=headers, json=payload
-            ) as response:
+            async with session.post('https://openrouter.ai/api/v1/chat/completions', headers=headers, json=payload) as response:
                 body = await response.json(content_type=None)
                 if response.status != 200:
                     print(f'OpenRouter API error HTTP {response.status}: {str(body)[:1200]}')
-                    return '🌷 سرویس هوش مصنوعی خطا داد. در Logs جزئیات ثبت شده؛ کلید، اعتبار حساب و نام مدل OpenRouter را بررسی کن.'
+                    return '🌷 سرویس هوش مصنوعی فعلاً پاسخ نداد. جزئیات خطا در Logs ثبت شده است.'
                 choices = body.get('choices') or []
                 answer = str(((choices[0].get('message') or {}).get('content')) or '').strip() if choices else ''
                 if not answer:
                     print(f'OpenRouter returned no answer: {str(body)[:800]}')
-                    return '🌷 سرویس هوش مصنوعی پاسخ متنی برنگرداند. جزئیات در Logs ثبت شد.'
-                if web_results:
-                    answer += '\\n\\n🔎 منابع وب برای بررسی بیشتر:\\n' + '\\n'.join(
-                        f"• {item.get('title','منبع وب')} — {item.get('url','')}" for item in web_results[:5]
-                    )
+                    return '🌷 این بار پاسخ متنی دریافت نشد؛ لطفاً دوباره امتحان کن.'
+                # Normalize literal backslash-n sequences sometimes emitted by models.
+                answer = answer.replace('\\n', '\n').replace('\r\n', '\n')
+                # If the model returned one huge paragraph, add breathing room after sentence boundaries.
+                if '\n\n' not in answer and len(answer) > 550:
+                    answer = re.sub(r'(?<=[.!؟])\s+(?=[\u0600-\u06FFA-Z0-9🧴🌷🔎])', '\n\n', answer)
                 return answer
     except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
         print(f'OpenRouter connection failed: {type(exc).__name__}: {exc}')
-        return '🌷 اتصال به OpenRouter برقرار نشد. اینترنت هاست و جزئیات Logs را بررسی کن.'
+        return '🌷 ارتباط با سرویس هوش مصنوعی برقرار نشد. چند لحظه دیگر دوباره امتحان کن.'
     except Exception as exc:
         print(f'Unexpected OpenRouter error: {type(exc).__name__}: {exc}')
-        return '🌷 هنگام دریافت پاسخ خطایی رخ داد. جزئیات در Logs ثبت شد.'
+        return '🌷 هنگام آماده‌کردن پاسخ خطایی رخ داد. لطفاً دوباره تلاش کن.'
 
 
 async def call_gemini(user_text:str, history=None, user_id=None):
@@ -2209,10 +2218,14 @@ async def text_search(m:Message):
         return
     if uid in AI_USERS and not q.startswith('/'):
         if len(q)<2: return
-        # AI chat intentionally does not load or query local CSV/database data.
+        # If the customer replies to a specific Telegram message, explicitly pass that message for analysis.
+        reply_to = m.reply_to_message
+        if reply_to and (reply_to.text or reply_to.caption):
+            quoted = (reply_to.text or reply_to.caption or '').strip()[:2500]
+            q = 'پیام موردنظر برای تحلیل (متنی که کاربر روی آن Reply زده):\n«' + quoted + '»\n\nدرخواست کاربر درباره این پیام: ' + q
         history=history_get(uid)
         interpreted=contextual_query(q,history)
-        # Let greetings, casual conversation, store questions and recommendation requests reach intent handling.
+        # Remember only explicit non-sensitive facts and preferences for future sessions.
         memory_update_from_user(uid, q)
         answer=await call_openrouter(q,history=history,user_id=uid)
         history_add(uid,'user',q)
