@@ -7,6 +7,7 @@ from aiogram.filters import CommandStart, Command
 from aiogram.types import Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
+from aiogram.exceptions import TelegramNetworkError, TelegramServerError
 import aiohttp
 
 load_dotenv()
@@ -1374,10 +1375,88 @@ def offline_answer(user_text:str, history=None)->str:
                 return '🔎 از روی کلمات کلیدی پیامت، این محصولات مرتبط رو در لیانا پیدا کردم 🌷\n\n'+'\n'.join(lines)+'\n\nبرای دیدن جزئیات و صفحه مستقیم هر محصول از دکمه‌های زیر استفاده کن. اگر کاربرد یا بودجه‌ی خاصی مدنظرت هست بگو تا پیشنهادها رو دقیق‌تر کنم.'
     return '🌸 من دستیار لیانا شاپ هستم و می‌تونم درباره آرایش، مراقبت پوست و مو، انتخاب محصولات، قیمت و موجودی، آدرس فروشگاه و خرید راهنمایی‌ات کنم. مثلاً بنویس «یه تینت لب خوب می‌خوام»، «برای پوست چرب چی مناسبه؟» یا «یه بادی‌اسپلش خوشبو معرفی کن». اگر منظورت محصول خاصیه، اسم یا کاربردش رو بگو تا داخل محصولات لیانا جست‌وجو کنم.'
 
+def catalog_request_reply(query:str, limit:int=5):
+    """Return only real catalog items that match a clearly requested product family."""
+    q = normalize_fa(query)
+    families = intent_families(q)
+    if not families:
+        return None
+
+    matches = intent_products(q, 200)
+    strict = []
+    seen = set()
+    # If the customer names an extra brand/model word that exists in the catalog,
+    # use it as a constraint rather than listing every item in the same category.
+    ignored = {
+        'عمده','لطفا','لطفاً','میخوام','می خواهم','میخواهم','می شود','میشه','دارید',
+        'دارین','موجود','هست','هستش','برای','واسه','یه','یک','خوب','بهتر','بهترین',
+        'محصول','محصولات','پیشنهاد','بده','بدید','معرفی','قیمت','چنده','چقدر','لطفا'
+    }
+    family_words = set()
+    for _, markers in families:
+        for marker in markers:
+            family_words.update(normalize_fa(marker).split())
+    query_tokens = [t for t in q.split() if len(t) > 2 and t not in ignored and t not in family_words]
+    catalog_words = set()
+    for item in DATA:
+        catalog_words.update(normalize_fa(item.get('name', '')).split())
+    specific_terms = [t for t in query_tokens if t in catalog_words]
+    for family, markers in families:
+        normalized_markers = [normalize_fa(x) for x in markers if normalize_fa(x)]
+        for product in matches:
+            if not product.get('published', True):
+                continue
+            name = normalize_fa(product.get('name', ''))
+            # Only show a product if its actual name supports the requested product type.
+            if not any(marker in name for marker in normalized_markers):
+                continue
+            if specific_terms and not all(term in name for term in specific_terms):
+                continue
+            pid = str(product.get('id', ''))
+            if pid not in seen:
+                strict.append(product)
+                seen.add(pid)
+    if not strict:
+        requested = '، '.join(family for family, _ in families)
+        return (
+            '🌷 ممنون که گفتی دنبال چی هستی! فعلاً محصولی با تطابق کافی برای '
+            f'«{requested}» در فهرست محصولات لیانا پیدا نکردم. 💗\\n\\n'
+            'نمی‌خوام محصول نامرتبطی بهت پیشنهاد بدم؛ اگر مدل، برند یا اسم دیگری مدنظرت هست '
+            'برام بنویس تا دوباره دقیق‌تر جست‌وجو کنم.'
+        )
+
+    shown = strict[:limit]
+    out = ['🔎 این محصولاتِ مرتبط رو در کاتالوگ لیانا پیدا کردم 🌷', '']
+    for product in shown:
+        out.append('🧴 ' + str(product.get('name', 'محصول')))
+        variants = product.get('variants') or []
+        prices = []
+        for variant in variants[:4]:
+            price = money_toman(variant.get('price_raw'))
+            attr = str(variant.get('attribute') or '').strip()
+            if price:
+                prices.append((attr + ' — ' if attr else '') + price)
+        if prices:
+            out.extend(prices)
+        description = str(product.get('description') or '').strip()
+        if description:
+            out.append(description[:280])
+        out.append('')
+    out.append('💗 اگر منظورت برند، رنگ یا بسته‌بندی مشخصیه، بگو تا بین همین محصولات دقیق‌تر برات پیدا کنم.')
+    return '\\n'.join(out).strip()
+
+
 async def call_gemini(user_text:str, history=None):
-    """Answer AI chat with Gemini only; do not retrieve local KB, learned FAQs, or catalog data."""
+    """Answer AI chat with Gemini, with a deterministic real-catalog search for product-family requests."""
     history=history or []
     interpreted_text=contextual_query(user_text,history)
+    normalized = normalize_fa(interpreted_text)
+    identity_phrases = ('کی هستی', 'تو کی هستی', 'خودت کی هستی', 'معرفی خودت', 'اسمت چیه', 'تو چی هستی')
+    if any(normalize_fa(phrase) in normalized for phrase in identity_phrases):
+        return '🤖 من دستیار هوش مصنوعی لیانا شاپ هستم؛ اینجام تا درباره محصولات آرایشی و بهداشتی، مراقبت پوست و مو و پیدا کردن محصولات مناسب راهنمایی‌ات کنم. 🌷'
+    catalog_answer = catalog_request_reply(interpreted_text)
+    if catalog_answer is not None:
+        return catalog_answer
     if not is_cosmetics_only_question(interpreted_text, history=history):
         return '🌷 من در این بخش فقط درباره آرایش، محصولات آرایشی و بهداشتی و مراقبت پوست و مو راهنمایی می‌کنم. لطفاً سؤالت رو در همین زمینه بپرس 💄🧴'
     if not GEMINI_API_KEY:
@@ -1385,8 +1464,8 @@ async def call_gemini(user_text:str, history=None):
     system_prompt=(
       'تو یک مشاور خوش‌برخورد و آگاه در زمینه آرایش، محصولات آرایشی و بهداشتی و مراقبت پوست و مو هستی. '
       'فقط به فارسی طبیعی پاسخ بده و فقط درباره همین موضوع‌ها راهنمایی کن. '
-      'در این گفت‌وگو به هیچ پایگاه داده محلی، فایل CSV، فهرست محصولات، پاسخ‌های ذخیره‌شده یا اطلاعات آموزش‌داده‌شده فروشگاه دسترسی نداری؛ '
-      'پس هرگز ادعا نکن محصولی در لیانا موجود است یا قیمت و موجودی مشخصی دارد. اگر قیمت یا موجودی پرسیده شد، توضیح بده که نمی‌توانی وضعیت لحظه‌ای فروشگاه را تأیید کنی و پیشنهاد بده از فروشگاه استعلام بگیرد. '
+      'برای معرفی محصولی که در کاتالوگ لیانا جست‌وجو نشده، نام محصول یا موجودی و قیمت قطعی جعل نکن. '
+      'قیمت و موجودی لحظه‌ای را فقط وقتی داده‌ای صریح در اختیار داری اعلام کن؛ در غیر این صورت پیشنهاد استعلام از فروشگاه بده. '
       'درباره ویژگی‌های خاص یک محصول، ترکیبات، رنگ‌ها، حجم، SPF یا ادعای درمانی اگر مطمئن نیستی حدس نزن و صریح بگو اطلاعات کافی نداری. '
       'برای انتخاب محصول، نیاز و نوع پوست/مو، بودجه و ترجیحات کاربر را در نظر بگیر؛ اگر اطلاعات کافی نیست یک سؤال کوتاه بپرس. '
       'از ادعاهای پزشکی قطعی پرهیز کن و برای مشکلات پوستی شدید یا ماندگار مراجعه به متخصص را پیشنهاد بده. '
@@ -1409,22 +1488,44 @@ async def call_gemini(user_text:str, history=None):
         'generationConfig': {'temperature':0.55,'maxOutputTokens':700}
     }
     url=f'https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent'
-    try:
-        timeout=aiohttp.ClientTimeout(total=25)
-        async with aiohttp.ClientSession(timeout=timeout) as session:
-            async with session.post(url,headers={'x-goog-api-key':GEMINI_API_KEY,'Content-Type':'application/json'},json=payload) as response:
-                body=await response.json(content_type=None)
-                if response.status==200:
-                    candidates=body.get('candidates') or []
-                    if candidates:
-                        parts=(candidates[0].get('content') or {}).get('parts') or []
-                        answer=''.join(str(part.get('text','')) for part in parts if part.get('text')).strip()
-                        if answer:
-                            return answer
-                print(f'Gemini API error: HTTP {response.status}: {str(body)[:1200]}')
-    except Exception as exc:
-        print(f'Gemini API request failed: {type(exc).__name__}: {exc}')
-    return '🌷 فعلاً نتونستم به دستیار هوشمند وصل بشم. لطفاً کمی بعد دوباره پیام بده.'
+    # Retry transient network/API failures with exponential backoff. A longer timeout
+    # gives Gemini room to finish a normal answer without hanging forever.
+    timeout=aiohttp.ClientTimeout(total=60, connect=15, sock_read=50)
+    retryable_statuses={408, 429, 500, 502, 503, 504}
+    last_error='unknown error'
+    for attempt in range(4):
+        try:
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.post(
+                    url,
+                    headers={'x-goog-api-key':GEMINI_API_KEY,'Content-Type':'application/json'},
+                    json=payload
+                ) as response:
+                    body=await response.json(content_type=None)
+                    if response.status==200:
+                        candidates=body.get('candidates') or []
+                        if candidates:
+                            parts=(candidates[0].get('content') or {}).get('parts') or []
+                            answer=''.join(str(part.get('text','')) for part in parts if part.get('text')).strip()
+                            if answer:
+                                return answer
+                        last_error='Gemini returned no text candidate'
+                    else:
+                        last_error=f'HTTP {response.status}: {str(body)[:500]}'
+                        print(f'Gemini API error (attempt {attempt+1}/4): {last_error}')
+                        if response.status not in retryable_statuses:
+                            break
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            last_error=f'{type(exc).__name__}: {exc}'
+            print(f'Gemini connection failed (attempt {attempt+1}/4): {last_error}')
+        except Exception as exc:
+            last_error=f'{type(exc).__name__}: {exc}'
+            print(f'Unexpected Gemini error (attempt {attempt+1}/4): {last_error}')
+            break
+        if attempt < 3:
+            await asyncio.sleep(min(2 ** attempt, 8))
+    print(f'Gemini failed after retries: {last_error}')
+    return '🌷 ارتباط با دستیار هوشمند موقتاً برقرار نشد. کمی بعد دوباره پیام بده؛ من اینجام که کمکت کنم.'
 
 @dp.callback_query(F.data=='ai:open')
 async def cb_ai_open(c:CallbackQuery):
@@ -1812,6 +1913,10 @@ async def text_search(m:Message):
         if step=='rule_choose':
             await m.answer('از دکمه‌های محصولی که نمایش داده شده انتخاب کن.')
             return
+    identity_query = normalize_fa(q)
+    if any(normalize_fa(phrase) in identity_query for phrase in ('کی هستی','تو کی هستی','خودت کی هستی','معرفی خودت','اسمت چیه','تو چی هستی')):
+        await m.answer('🤖 من دستیار هوش مصنوعی لیانا شاپ هستم؛ اینجام تا درباره محصولات آرایشی و بهداشتی، مراقبت پوست و مو و پیدا کردن محصولات مناسب راهنمایی‌ات کنم. 🌷')
+        return
     if uid in AI_USERS and not q.startswith('/'):
         if len(q)<2: return
         # AI chat intentionally does not load or query local CSV/database data.
@@ -1823,7 +1928,13 @@ async def text_search(m:Message):
         history_add(uid,'assistant',answer)
         # Use the pre-turn history when deriving product buttons so a short answer
         # such as «گندمی» stays linked to the original tint/concealer question.
-        await m.answer(esc(answer),reply_markup=conversational_keyboard(q,history,answer))
+        # When a requested product family has no trustworthy catalog match, do not
+        # attach fuzzy buttons that could contradict the "not found" message.
+        if 'فعلاً محصولی با تطابق کافی' in answer:
+            reply_markup = ai_kb()
+        else:
+            reply_markup = conversational_keyboard(q,history,answer)
+        await m.answer(esc(answer),reply_markup=reply_markup)
         return
     if q.startswith('/') or len(q)<2: return
     # Outside AI mode, keep behavior deterministic: search the real product catalog only.
@@ -1990,5 +2101,20 @@ async def main():
     print(f"[CSV] فایل محلی بررسی شد؛ {local_count} محصول CSV، کل کاتالوگ فعلی: {len(DATA)}")
     await refresh_csv_feed()
     asyncio.create_task(csv_refresh_loop())
-    await dp.start_polling(bot)
+    # Telegram polling is managed separately from Gemini requests. If Telegram's
+    # network connection drops temporarily, reconnect with a bounded backoff.
+    retry_delay = 2
+    while True:
+        try:
+            await dp.start_polling(bot, close_bot_session=False)
+            retry_delay = 2
+        except (TelegramNetworkError, TelegramServerError, aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            print(f'Telegram connection interrupted: {type(exc).__name__}: {exc}. Retry in {retry_delay}s.')
+            await asyncio.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, 60)
+        except Exception as exc:
+            # Log unexpected polling errors and retry rather than silently terminating the bot.
+            print(f'Unexpected Telegram polling error: {type(exc).__name__}: {exc}. Retry in {retry_delay}s.')
+            await asyncio.sleep(retry_delay)
+            retry_delay = min(retry_delay * 2, 60)
 if __name__=='__main__': asyncio.run(main())
