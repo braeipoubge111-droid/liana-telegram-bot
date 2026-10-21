@@ -280,7 +280,6 @@ def find(pid): return next((p for p in DATA if str(p.get('id',''))==str(pid)),No
 async def start(m:Message):
     AI_USERS.discard(m.from_user.id)
     OWNER_PASSWORD_PENDING.discard(m.from_user.id)
-    history_clear(m.from_user.id)
     await m.answer(HOME_TEXT,reply_markup=home_kb())
 @dp.message(Command('owner'))
 async def owner_command(m:Message):
@@ -295,7 +294,6 @@ async def owner_command(m:Message):
 async def home(m:Message):
     AI_USERS.discard(m.from_user.id)
     OWNER_PASSWORD_PENDING.discard(m.from_user.id)
-    history_clear(m.from_user.id)
     await m.answer(HOME_TEXT,reply_markup=home_kb())
 # --- AI chat, weekly quota and owner test mode ---
 def init_db():
@@ -304,8 +302,30 @@ def init_db():
         # Short conversation memory lets follow-up answers such as «گندمیه»
         # be interpreted against the question the assistant asked previously.
         con.execute("CREATE TABLE IF NOT EXISTS ai_history (user_id INTEGER NOT NULL, role TEXT NOT NULL, content TEXT NOT NULL, created_at INTEGER NOT NULL)")
+        con.execute("CREATE TABLE IF NOT EXISTS ai_memory (user_id INTEGER NOT NULL, fact TEXT NOT NULL, created_at INTEGER NOT NULL, UNIQUE(user_id, fact))")
 
-def history_get(user_id:int, limit:int=12):
+def memory_get(user_id:int, limit:int=20):
+    with sqlite3.connect(DB_PATH) as con:
+        rows=con.execute("SELECT fact FROM ai_memory WHERE user_id=? ORDER BY created_at DESC LIMIT ?",(user_id,limit)).fetchall()
+    return [r[0] for r in reversed(rows)]
+
+def memory_update_from_user(user_id:int, text:str):
+    """Remember explicit, non-sensitive preferences/context; avoid credentials and sensitive data."""
+    raw=' '.join(str(text or '').split())
+    n=normalize_fa(raw)
+    markers=('من دوست دارم','من ترجیح میدم','من ترجیح می دهم','علاقه دارم','یادت باشه','یادت بماند','یادت بمونه','از این به بعد','همیشه برام','سبک مورد علاقه من','فروشگاه من','ربات من')
+    if len(raw)<8 or len(raw)>240 or not any(normalize_fa(m) in n for m in markers):
+        return
+    # Do not persist messages that appear to contain secrets, credentials, or highly sensitive data.
+    sensitive=('رمز عبور','پسورد','password','توکن','api key','کلید api','کد ملی','شماره کارت','شماره حساب','آدرس دقیق خانه')
+    if any(normalize_fa(x) in n for x in sensitive):
+        return
+    fact=raw[:240]
+    with sqlite3.connect(DB_PATH) as con:
+        con.execute("INSERT OR IGNORE INTO ai_memory(user_id,fact,created_at) VALUES(?,?,?)",(user_id,fact,int(time.time())))
+        con.execute("DELETE FROM ai_memory WHERE user_id=? AND rowid NOT IN (SELECT rowid FROM ai_memory WHERE user_id=? ORDER BY created_at DESC LIMIT 30)",(user_id,user_id))
+
+def history_get(user_id:int, limit:int=40):
     with sqlite3.connect(DB_PATH) as con:
         rows=con.execute("SELECT role,content FROM ai_history WHERE user_id=? ORDER BY created_at DESC, rowid DESC LIMIT ?",(user_id,limit)).fetchall()
     return [{'role':r,'content':c} for r,c in reversed(rows)]
@@ -313,8 +333,8 @@ def history_get(user_id:int, limit:int=12):
 def history_add(user_id:int, role:str, content:str):
     with sqlite3.connect(DB_PATH) as con:
         con.execute("INSERT INTO ai_history(user_id,role,content,created_at) VALUES(?,?,?,?)",(user_id,role,str(content)[:3000],int(time.time())))
-        # Keep the latest 12 messages per customer; old turns are not needed.
-        con.execute("DELETE FROM ai_history WHERE user_id=? AND rowid NOT IN (SELECT rowid FROM ai_history WHERE user_id=? ORDER BY created_at DESC, rowid DESC LIMIT 12)",(user_id,user_id))
+        # Keep the latest 40 messages per customer for ongoing context.
+        con.execute("DELETE FROM ai_history WHERE user_id=? AND rowid NOT IN (SELECT rowid FROM ai_history WHERE user_id=? ORDER BY created_at DESC, rowid DESC LIMIT 40)",(user_id,user_id))
 
 def history_clear(user_id:int):
     with sqlite3.connect(DB_PATH) as con:
@@ -1446,14 +1466,14 @@ def catalog_request_reply(query:str, limit:int=5):
     return '\n'.join(out).strip()
 
 
-async def call_gemini(user_text:str, history=None):
+async def call_gemini(user_text:str, history=None, user_id=None):
     """Answer AI chat with Gemini, with a deterministic real-catalog search for product-family requests."""
     history=history or []
     interpreted_text=contextual_query(user_text,history)
     normalized = normalize_fa(interpreted_text)
     identity_phrases = ('کی هستی', 'تو کی هستی', 'خودت کی هستی', 'معرفی خودت', 'اسمت چیه', 'تو چی هستی')
     if any(normalize_fa(phrase) in normalized for phrase in identity_phrases):
-        return '🤖 من دستیار هوش مصنوعی لیانا شاپ هستم؛ اینجام تا درباره محصولات آرایشی و بهداشتی، مراقبت پوست و مو و پیدا کردن محصولات مناسب راهنمایی‌ات کنم. 🌷'
+        return '🤖 من دستیار هوش مصنوعی لیانا شاپ هستم؛ می‌تونم درباره موضوعات عمومی، فناوری، برنامه‌نویسی، برندها و محصولات هم کمکت کنم و برای اطلاعات تازه در اینترنت جست‌وجو کنم. 🌐🌷'
     qn = normalize_fa(interpreted_text)
     # Store facts already configured by the shop owner should be answered from
     # the local, known information rather than guessed by the language model.
@@ -1482,23 +1502,26 @@ async def call_gemini(user_text:str, history=None):
             return catalog_answer
     beauty_brand_terms = ('ویولت','شیگلم','xixi','ایکس ایکس آی','ارت اسکین','آرت اسکین','جولیوم','کماس','کالیستا','مای','فلورمار','گلدن رز','نوت','لورال','مک','میبلین','اسنس','رولوشن','روماند','گابرینی','بیول','لافارر','سینره','درماتیپیک')
     brand_context = wants_web_research and any(normalize_fa(term) in qn for term in beauty_brand_terms)
-    if not is_cosmetics_only_question(interpreted_text, history=history) and not brand_context:
-        return '🌷 من در این بخش فقط درباره آرایش، محصولات آرایشی و بهداشتی و مراقبت پوست و مو راهنمایی می‌کنم. لطفاً سؤالت رو در همین زمینه بپرس 💄🧴'
     if not GEMINI_API_KEY:
         return '🌷 دستیار هوشمند فعلاً در دسترس نیست. لطفاً کمی بعد دوباره امتحان کن.'
+    remembered_facts=[]
+    # Pull long-term user preferences from the persistent SQLite memory.
+    try:
+        if user_id is not None:
+            remembered_facts = memory_get(user_id)
+    except Exception:
+        remembered_facts=[]
+    memory_block = ('\nاطلاعات و ترجیحات قبلی که کاربر صریحاً گفته و باید در صورت مرتبط بودن در نظر بگیری: ' + ' | '.join(remembered_facts)) if remembered_facts else ''
     system_prompt=(
-      'تو دستیار هوشمند و مشاور خوش‌برخورد لیانا شاپ در زمینه آرایش، محصولات آرایشی و بهداشتی و مراقبت پوست و مو هستی. '
-      'همیشه فارسی روان، خوش‌خوان، کامل و کاربردی بنویس؛ لحن گرم و صمیمی داشته باش و گاهی متناسب با فضا از «عزیزم»، «جانم» یا «حتماً گلم» استفاده کن، اما در هر پیام زیاده‌روی نکن. '
-      'از ۲ تا ۵ ایموجی مرتبط و زیبا در جای مناسب استفاده کن و متن را با تیتر یا فهرست کوتاه مرتب کن؛ ایموجی‌ها جای اطلاعات واقعی را نگیرند. '
-      'فقط به موضوعات آرایش، زیبایی، مراقبت پوست و مو، برندهای آرایشی، محصولات آرایشی و اطلاعات فروشگاه لیانا شاپ پاسخ محتوایی بده. '
-      'قانون بسیار مهم: هرگز نام محصول، برند، قیمت، موجودی، آدرس، شماره تماس، ترکیبات، رنگ، حجم، SPF یا ویژگی‌ای را که منبع معتبر تأیید نکرده جعل نکن. '
-      'کاتالوگ واقعی لیانا مرجع قطعی محصول، قیمت و موجودی است؛ محصولی را به لیانا نسبت نده مگر واقعاً در کاتالوگ پیدا شده باشد. اگر تطابق پیدا نشد، صادقانه بگو و محصول نامرتبط را به‌جای آن پیشنهاد نده. '
-      'برای اطلاعات درباره شرکت‌ها و برندها، کشور سازنده، ترکیبات، مشخصات و موضوعات روز آرایشی از نتایج جست‌وجوی وب استفاده کن؛ فقط نتیجه‌ای را بگو که با شواهد وب پشتیبانی می‌شود. اگر منبع معتبر پیدا نشد، شفاف بگو نتوانستی تأیید کنی. '
-      'نتایج وب درباره موجود بودن در لیانا، قیمت روز یا موجودی فروشگاه مدرک محسوب نمی‌شوند؛ این موارد را فقط از کاتالوگ/اطلاعات قطعی فروشگاه بگو و در غیر این صورت کاربر را برای استعلام راهنمایی کن. '
-      'وقتی چند محصول واقعی در کاتالوگ موجودند، درخواست کاربر مثل نوع پوست/مو، کاربرد، رنگ دلخواه، بودجه و ترجیحاتش را لحاظ کن؛ اگر برای انتخاب دقیق اطلاعات مهمی کم است یک سؤال کوتاه بپرس. '
-      'اگر پاسخ بر جست‌وجوی وب متکی است، منابع را با عنوان و لینک قابل کلیک در انتهای پاسخ بیاور و تفاوت اطلاعات تأییدشده با توصیه عمومی را روشن کن. '
-      'از ادعاهای پزشکی قطعی پرهیز کن و برای مشکلات پوستی شدید یا ماندگار مراجعه به متخصص را پیشنهاد بده. '
-      'به سلام و احوالپرسی و تشکر طبیعی و صمیمی جواب بده. درباره موضوعات خارج از حوزه گفته‌شده پاسخ محتوایی نده و محترمانه موضوع مجاز را یادآوری کن.'
+      'تو یک دستیار هوش مصنوعی عمومی، آگاه، طبیعی و خوش‌برخورد هستی که در گفت‌وگوهای مرتبط نماینده لیانا شاپ هم هستی. '
+      'به پرسش‌های عمومی کاربر درباره علم، فناوری، تاریخ، زبان، برنامه‌نویسی، فرهنگ، برندها، شرکت‌ها، اخبار، آرایش، محصولات و سایر موضوعات مجاز پاسخ مستقیم و واقعی بده؛ خودت را به حوزه آرایشی محدود نکن. '
+      'هر پیام را با سلام شروع نکن. فقط وقتی کاربر سلام می‌کند سلام کن؛ در ادامه مکالمه مستقیماً به اصل سؤال جواب بده و از تکرار مقدمه‌های کلی خودداری کن. '
+      'فارسی روان، طبیعی و شبیه گفت‌وگوی انسانی بنویس. لحن صمیمی داشته باش و گاهی، فقط وقتی طبیعی است، از «عزیزم» یا «گلم» استفاده کن؛ در هر پیام تکرارشان نکن. از ۱ تا ۴ ایموجی مرتبط در صورت مناسب بودن استفاده کن، نه به‌زور. '
+      'برای پرسش‌های اطلاعاتی و به‌خصوص اطلاعات جدید، از ابزار جست‌وجوی وب و شواهد تازه استفاده کن؛ منابع را با لینک قابل کلیک در انتهای پاسخ بیاور. اگر وب نتیجه کافی نداد، صادقانه بگو چه چیزی تأیید نشده و هرگز منبع یا لینک نساز. '
+      'بین واقعیت تأییدشده، استنباط و پیشنهاد شخصی تفاوت بگذار. اگر سؤال مبهم است، بهترین برداشت معقول را پاسخ بده و فقط در صورت نیاز یک سؤال روشن‌کننده بپرس. '
+      'در مورد محصولات لیانا شاپ، فقط محصولاتی را پیشنهاد بده که واقعاً در کاتالوگ آمده‌اند. اینترنت به‌تنهایی اثبات موجودی یا قیمت فروشگاه نیست؛ قیمت و موجودی را فقط از داده معتبر فروشگاه اعلام کن. اگر محصول مرتبطی پیدا نشد، شفاف بگو و محصول خیالی یا نامرتبط پیشنهاد نده. '
+      'اطلاعات قبلی کاربر را در صورت مرتبط بودن در نظر بگیر، اما اطلاعات حساس، رمزها، توکن‌ها یا اطلاعات محرمانه را درخواست یا تکرار نکن. برای موضوعات پزشکی، حقوقی یا مالی، توضیح عمومی محتاطانه بده و محدودیت‌ها را روشن کن. '
+      + memory_block
     )
     contents=[]
     for item in history[-10:]:
@@ -1515,13 +1538,8 @@ async def call_gemini(user_text:str, history=None):
         'contents': contents,
         'generationConfig': {'temperature':0.45,'maxOutputTokens':1000}
     }
-    # Gemini's Google Search grounding supplies fresh web evidence and source URLs.
-    # Enable it for beauty/brand questions so answers can be checked by the customer.
-    if wants_web_research or any(normalize_fa(term) in qn for term in (
-        'محصول چیه','چی هست','چه کاربردی','برای چی خوبه','ترکیب','مواد موثر',
-        'فرق بین','تفاوت','جدیدترین','ترند','معرفی برند','برندهای آرایشی'
-    )):
-        payload['tools'] = [{'google_search': {}}]
+    # Enable Google Search grounding for all questions so fresh facts can be checked.
+    payload['tools'] = [{'google_search': {}}]
     url=f'https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent'
     # Retry transient network/API failures with exponential backoff. A longer timeout
     # gives Gemini room to finish a normal answer without hanging forever.
@@ -1583,8 +1601,8 @@ async def call_gemini(user_text:str, history=None):
 @dp.callback_query(F.data=='ai:open')
 async def cb_ai_open(c:CallbackQuery):
     uid=c.from_user.id
-    AI_USERS.add(uid); OWNER_PASSWORD_PENDING.discard(uid); history_clear(uid)
-    await c.message.answer('🤖 <b>دستیار آرایشی و بهداشتی لیانا شاپ</b>\n\nاینجا فقط به سؤال‌های مربوط به آرایش، محصولات آرایشی و بهداشتی، مراقبت پوست و مو و قیمت یا موجودی همین محصولات پاسخ می‌دهم. 🌷\n\nسؤال‌های نامرتبط با این موضوع پاسخ داده نمی‌شوند. اسم محصول یا نیازت رو بنویس تا راهنمایی‌ات کنم و اگر لازم بود داخل محصولات لیانا جست‌وجو کنم.\n\nپیامت را بفرست؛ برای خروج دکمه زیر را بزن.',reply_markup=ai_kb())
+    AI_USERS.add(uid); OWNER_PASSWORD_PENDING.discard(uid)
+    await c.message.answer('🤖 <b>دستیار هوشمند لیانا شاپ</b>\n\nمی‌تونی درباره موضوعات عمومی، فناوری، برنامه‌نویسی، شرکت‌ها، برندها، آرایش و محصولات هم سؤال بپرسی. 🌐\n\nبرای اطلاعات تازه در اینترنت جست‌وجو می‌کنم و وقتی درباره محصولات لیانا می‌پرسی، فقط به اطلاعات واقعی کاتالوگ تکیه می‌کنم. گفت‌وگوهای قبلی و ترجیحات غیرحساس تو هم برای ادامه مکالمه نگه داشته می‌شوند.\n\nسؤالت رو بفرست؛ برای خروج دکمه زیر را بزن.',reply_markup=ai_kb())
     await c.answer()
 
 @dp.callback_query(F.data=='ai:continue')
@@ -1604,7 +1622,6 @@ async def cb_ai_owner(c:CallbackQuery):
 @dp.callback_query(F.data=='ai:exit')
 async def cb_ai_exit(c:CallbackQuery):
     uid=c.from_user.id; AI_USERS.discard(uid); OWNER_PASSWORD_PENDING.discard(uid)
-    history_clear(uid)
     await c.message.answer('از حالت هوش مصنوعی خارج شدی 🌷',reply_markup=home_kb())
     await c.answer()
 
@@ -1968,7 +1985,7 @@ async def text_search(m:Message):
             return
     identity_query = normalize_fa(q)
     if any(normalize_fa(phrase) in identity_query for phrase in ('کی هستی','تو کی هستی','خودت کی هستی','معرفی خودت','اسمت چیه','تو چی هستی')):
-        await m.answer('🤖 من دستیار هوش مصنوعی لیانا شاپ هستم؛ اینجام تا درباره محصولات آرایشی و بهداشتی، مراقبت پوست و مو و پیدا کردن محصولات مناسب راهنمایی‌ات کنم. 🌷')
+        await m.answer('🤖 من دستیار هوش مصنوعی لیانا شاپ هستم؛ می‌تونم درباره موضوعات عمومی، فناوری، برنامه‌نویسی، برندها و محصولات هم کمکت کنم و برای اطلاعات تازه در اینترنت جست‌وجو کنم. 🌐🌷')
         return
     if uid in AI_USERS and not q.startswith('/'):
         if len(q)<2: return
@@ -1976,7 +1993,8 @@ async def text_search(m:Message):
         history=history_get(uid)
         interpreted=contextual_query(q,history)
         # Let greetings, casual conversation, store questions and recommendation requests reach intent handling.
-        answer=await call_gemini(q,history=history)
+        memory_update_from_user(uid, q)
+        answer=await call_gemini(q,history=history,user_id=uid)
         history_add(uid,'user',q)
         history_add(uid,'assistant',answer)
         # Use the pre-turn history when deriving product buttons so a short answer
