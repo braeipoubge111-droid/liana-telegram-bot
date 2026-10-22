@@ -809,12 +809,12 @@ def _openrouter_ready_models():
 
 async def _openrouter_best_answer(messages, user_text):
     """مدل‌ها را به‌ترتیب امتحان می‌کند؛ پاسخ خراب، غیرفارسی یا خطا یعنی رفتن سراغ مدل بعدی."""
-    timeout=aiohttp.ClientTimeout(total=40,connect=10,sock_read=35)
+    timeout=aiohttp.ClientTimeout(total=22,connect=6,sock_read=18)
     headers={'Authorization':f'Bearer {OPENROUTER_API_KEY}','Content-Type':'application/json',
              'HTTP-Referer':OPENROUTER_SITE_URL,'X-OpenRouter-Title':OPENROUTER_APP_NAME}
     last_error='unknown'
     for model in _openrouter_ready_models():
-        for attempt in range(2):
+        for attempt in range(1):
             try:
                 payload={'model':model,'messages':messages,'temperature':0.3,'top_p':0.9,'max_tokens':800}
                 async with aiohttp.ClientSession(timeout=timeout) as session:
@@ -1805,7 +1805,15 @@ async def call_groq_with_web_search(user_text:str, history=None, user_id=None):
     if not GROQ_API_KEY:
         print('AI config error: neither GEMINI_API_KEY/GOOGLE_API_KEY nor GROQ_API_KEY is configured')
         return '🌷 دستیار هوشمند تنظیم نشده است. در FadeHost متغیر OPENROUTER_API_KEY را در تنظیمات هاست بررسی کن.'
-    results=await _duckduckgo_web_search(user_text,5)
+    qn = normalize_fa(user_text)
+    web_terms = (
+        'سرچ کن', 'جستجو کن', 'جست وجو کن', 'در اینترنت', 'منبع بده',
+        'منابع بده', 'لینک منبع', 'جدیدترین', 'قیمت روز', 'آخرین خبر',
+        'اطلاعات تازه', 'درباره برند', 'تاریخچه', 'وب سایت رسمی',
+        'شرکت', 'کمپانی', 'کشور سازنده', 'اصالت', 'ریویو', 'بررسی کن'
+    )
+    wants_web = any(normalize_fa(term) in qn for term in web_terms)
+    results = await _duckduckgo_web_search(user_text, 5) if wants_web else []
     web_context=''
     if results:
         web_context='\n\nنتایج جست‌وجوی وب (منبع بیرونی؛ صحت هر مورد را ارزیابی کن):\n'+'\n'.join(
@@ -1822,7 +1830,7 @@ async def call_groq_with_web_search(user_text:str, history=None, user_id=None):
         if role in ('assistant','user') and str(item.get('content','')).strip():
             messages.append({'role':role,'content':str(item.get('content',''))[:3000]})
     messages.append({'role':'user','content':user_text+build_grounding_context(user_text)+web_context})
-    timeout=aiohttp.ClientTimeout(total=60,connect=15,sock_read=50)
+    timeout=aiohttp.ClientTimeout(total=28,connect=8,sock_read=22)
     try:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post('https://api.groq.com/openai/v1/chat/completions',
@@ -2153,15 +2161,17 @@ async def call_gemini(user_text:str, history=None, user_id=None):
         'contents': contents,
         'generationConfig': {'temperature':0.45,'maxOutputTokens':1000}
     }
-    # Enable Google Search grounding for all questions so fresh facts can be checked.
-    payload['tools'] = [{'google_search': {}}]
+    # Enable Google Search grounding only for research/current-information questions;
+    # ordinary chat and beauty advice should return faster.
+    if wants_web_research:
+        payload['tools'] = [{'google_search': {}}]
     url=f'https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent'
     # Retry transient network/API failures with exponential backoff. A longer timeout
     # gives Gemini room to finish a normal answer without hanging forever.
-    timeout=aiohttp.ClientTimeout(total=60, connect=15, sock_read=50)
+    timeout=aiohttp.ClientTimeout(total=28, connect=8, sock_read=22)
     retryable_statuses={408, 429, 500, 502, 503, 504}
     last_error='unknown error'
-    for attempt in range(4):
+    for attempt in range(2):
         try:
             async with aiohttp.ClientSession(timeout=timeout) as session:
                 async with session.post(
@@ -2208,8 +2218,8 @@ async def call_gemini(user_text:str, history=None, user_id=None):
             last_error=f'{type(exc).__name__}: {exc}'
             print(f'Unexpected Gemini error (attempt {attempt+1}/4): {last_error}')
             break
-        if attempt < 3:
-            await asyncio.sleep(min(2 ** attempt, 8))
+        if attempt < 1:
+            await asyncio.sleep(1)
     print(f'Gemini failed after retries: {last_error}')
     # If both providers are configured, use Groq as a fallback instead of dropping the message.
     if GROQ_API_KEY:
